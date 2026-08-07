@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned deliberately. The Pi is operated blind, so "works on the Mac, fails on
+# the Pi" must never be a toolchain difference we have to diagnose remotely.
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,57 @@
+# Hard-tier fixture — weak signal, indoors, obstructed.
+#
+# Captured at the desk in the condo-facing office, antenna on a tripod in the
+# open room. This is deliberately a *difficult* file: few aircraft, low SNR,
+# and a limited number of recoverable messages. Score against it to check that
+# an improvement helps marginal signals rather than only strong ones.
+
+schema = 1
+name = "desk"
+
+[file]
+path = "desk.cu8"
+sha256 = "641a3439f3c934c2d6fe91739d134af7b378bd7506812cc8d85cfc125a37c801"
+bytes = 576_000_000
+format = "cu8"
+
+[capture]
+started_utc = "2026-08-07T02:20:00Z"   # approximate, to the minute
+duration_s = 120
+center_freq_hz = 1_090_000_000
+sample_rate_hz = 2_400_000
+gain_db = 49.6
+gain_mode = "manual"
+agc = "unknown"
+bias_tee = false
+tool = "rtl_sdr (homebrew, built from source)"
+
+[hardware]
+sdr = "RTL-SDR Blog V3"
+tuner = "Rafael Micro R820T"
+antenna = "RTL-SDR Blog dipole kit, both whips fully collapsed"
+antenna_length_cm = 15.0
+antenna_orientation = "vertical"
+mount = "flexible tripod on a desk, interior room, no sky view"
+
+[receiver]
+lat = 0.0
+lon = 0.0
+altitude_m = 0.0
+unset = true
+
+[expected]
+naive_candidates = 277
+naive_crc_ok = 190
+naive_aircraft = 3
+naive_msg_per_min = 95.0
+max_range_km = 47.0
+
+[notes]
+text = """
+The building, not the receiver, is the limit here. 47 km is blockage-limited,
+not distance-limited -- the radio horizon for an aircraft at FL360 is over
+400 km. Useful precisely because it is hard.
+
+Aircraft present include C060B6 (level at FL240, westbound), C060BC (descending
+through 4000 ft into CYOW) and C02966 (FL360, 47 km north).
+"""

@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/adsb-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/t-eckert/skyward"
+
+[workspace.dependencies]
+adsb-core = { path = "crates/adsb-core" }
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1          # keep symbols: profiling on the Pi is otherwise blind
+
+# Benchmarks must never run in debug. A naive detector that looks 40x slower
+# than it is will send you optimizing the wrong stage.
+[profile.dev.package."*"]
+opt-level = 2

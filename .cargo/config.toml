@@ -1,0 +1,19 @@
+# Use Apple's linker on macOS.
+#
+# This machine has nix on PATH, so bare `cc`/`ld` resolve to
+# /etc/profiles/per-user/$USER/bin/. Linking Rust with the nix ld produces
+# binaries whose unwind tables macOS's unwinder cannot walk: every panic dies
+# with "fatal runtime error: failed to initiate panic, error 5" (_URC_END_OF_STACK)
+# and SIGABRTs instead of unwinding.
+#
+# The practical consequence is that `cargo test` cannot report a failing
+# assertion -- the whole test binary aborts on the first one, and #[should_panic]
+# can never pass. Debugging DSP code without readable test failures is not
+# something to attempt.
+#
+# Scoped to the Darwin target so aarch64 Linux builds for the Pi are untouched.
+[target.aarch64-apple-darwin]
+linker = "/usr/bin/clang"
+
+[target.x86_64-apple-darwin]
+linker = "/usr/bin/clang"

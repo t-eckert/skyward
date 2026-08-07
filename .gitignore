@@ -1,0 +1,26 @@
+/target
+**/*.rs.bk
+
+# Raw IQ captures are hundreds of MB each. They live in object storage and are
+# fetched with `skyward fixtures fetch`. The .toml sidecars ARE committed --
+# a capture without its metadata is worthless.
+/fixtures/raw/*
+!/fixtures/raw/*.toml
+!/fixtures/raw/.gitkeep
+
+# Local configuration. Holds the receiver's real coordinates, which are a home
+# address -- keep them out of a public repo. `.env.example` is the committed
+# template; `skyward doctor` reports which file each value actually came from.
+.env
+.env.local
+/skyward.toml
+!/skyward.example.toml
+
+*.db
+*.db-wal
+*.db-shm
+/bundles/
+
+# Diagnostic bundles collected from the Pi may contain a raw IQ sample and
+# journal lines; review before sharing.
+/bundles/*.tar.gz

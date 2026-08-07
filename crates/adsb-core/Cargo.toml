@@ -1,0 +1,13 @@
+[package]
+name = "adsb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mode S / ADS-B message decoding. Pure logic, no I/O."
+
+# Deliberately almost dependency-free. This crate must compile and test in
+# under a second so the tests actually get run, and it must contain nothing
+# that can behave differently on the Pi than on the Mac.
+[dependencies]
+thiserror.workspace = true
