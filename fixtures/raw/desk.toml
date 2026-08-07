@@ -40,11 +40,17 @@ altitude_m = 0.0
 unset = true
 
 [expected]
-naive_candidates = 277
-naive_crc_ok = 190
-naive_aircraft = 3
-naive_msg_per_min = 95.0
+baseline_candidates = 279
+baseline_crc_ok = 167
+baseline_aircraft = 3
+baseline_msg_per_min = 83.5
+baseline_yield = 0.599
 max_range_km = 47.0
+
+[headroom]
+# Same slicer difference as golden.toml: the exploratory tool, which averaged
+# over each half-bit rather than point-sampling, got 190 from 277 candidates.
+integrating_slicer_crc_ok = 190
 
 [notes]
 text = """

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/adsb-core"]
+members = ["crates/adsb-core", "crates/adsb-dsp"]
 
 [workspace.package]
 version = "0.1.0"

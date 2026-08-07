@@ -1,0 +1,13 @@
+[package]
+name = "adsb-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Signal processing: IQ samples in, validated Mode S frames out."
+
+# This is the crate you will spend your learning time in. It depends only on
+# adsb-core so that a `cargo test -p adsb-dsp` cycle stays under a second.
+[dependencies]
+adsb-core.workspace = true
+thiserror.workspace = true
