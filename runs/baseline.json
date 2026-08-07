@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "git_sha": "c350cf6",
+  "impl_set": "mag=naive detect=naive slice=naive validate=crc-only",
+  "results": [
+    {
+      "fixture": "fixtures/raw/desk.cu8",
+      "sample_rate_hz": 2400000,
+      "seconds": 120.0,
+      "crc_ok": 167,
+      "unique_messages": 167,
+      "aircraft": 3,
+      "positions": 33,
+      "candidates": 279,
+      "crc_fail": 112,
+      "crc_yield": 0.5985663082437276,
+      "candidates_per_message": 1.6706586826347305,
+      "messages_per_minute": 83.5,
+      "ghost_icao_ratio": 0.0,
+      "realtime_factor": 217.56207954451088,
+      "ns_per_sample": 1.9151621805555556,
+      "by_type_code": {
+        "TC11": 50,
+        "TC19": 31,
+        "TC28": 7,
+        "TC29": 18,
+        "TC31": 5,
+        "TC4": 4
+      },
+      "digest": "fnv1a64:e3dfbefc3d750807"
+    },
+    {
+      "fixture": "fixtures/raw/golden.cu8",
+      "sample_rate_hz": 2400000,
+      "seconds": 180.0,
+      "crc_ok": 517,
+      "unique_messages": 517,
+      "aircraft": 7,
+      "positions": 72,
+      "candidates": 879,
+      "crc_fail": 362,
+      "crc_yield": 0.5881683731513083,
+      "candidates_per_message": 1.700193423597679,
+      "messages_per_minute": 172.33333333333334,
+      "ghost_icao_ratio": 0.0,
+      "realtime_factor": 361.52249196216496,
+      "ns_per_sample": 1.1525331782407406,
+      "by_type_code": {
+        "TC11": 133,
+        "TC19": 122,
+        "TC28": 15,
+        "TC29": 50,
+        "TC31": 30,
+        "TC4": 9
+      },
+      "digest": "fnv1a64:c3ed11b99d82a415"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+[package]
+name = "adsb-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable history: batched SQLite writes with retention."
+
+[dependencies]
+adsb-core.workspace = true
+adsb-track.workspace = true
+thiserror.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }

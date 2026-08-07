@@ -1,0 +1,32 @@
+[package]
+name = "adsb-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The skyward binary: run, doctor, bench, bundle."
+
+[[bin]]
+name = "skyward"
+path = "src/main.rs"
+
+[dependencies]
+adsb-core.workspace = true
+adsb-dsp.workspace = true
+adsb-source.workspace = true
+adsb-store.workspace = true
+adsb-track.workspace = true
+
+anyhow = "1"
+arc-swap = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio-stream = "0.1"
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

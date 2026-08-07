@@ -1,0 +1,11 @@
+[package]
+name = "adsb-track"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Turning a stream of messages into a set of aircraft."
+
+[dependencies]
+adsb-core.workspace = true
+thiserror.workspace = true
