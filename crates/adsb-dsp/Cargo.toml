@@ -11,3 +11,9 @@ description = "Signal processing: IQ samples in, validated Mode S frames out."
 [dependencies]
 adsb-core.workspace = true
 thiserror.workspace = true
+
+# Examples only. adsb-source does not depend on this crate, so there is no
+# cycle -- and keeping it out of [dependencies] means the DSP crate stays
+# testable with no I/O at all.
+[dev-dependencies]
+adsb-source.workspace = true

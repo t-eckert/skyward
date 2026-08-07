@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/adsb-core", "crates/adsb-dsp"]
+members = ["crates/adsb-core", "crates/adsb-dsp", "crates/adsb-source"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,8 @@ repository = "https://github.com/t-eckert/skyward"
 
 [workspace.dependencies]
 adsb-core = { path = "crates/adsb-core" }
+adsb-dsp = { path = "crates/adsb-dsp" }
+adsb-source = { path = "crates/adsb-source" }
 thiserror = "2"
 
 [profile.release]

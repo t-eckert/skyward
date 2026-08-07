@@ -1,0 +1,19 @@
+[package]
+name = "adsb-source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Where IQ samples come from: a file, rtl_tcp, or the dongle."
+
+[features]
+# Off by default on purpose. Without it this crate has zero C dependencies,
+# so an aarch64 cross-build for the Pi is unremarkable. The recommended
+# deployment runs rtl_tcp (which uses libusb async transfers internally, and
+# so does not drop samples between reads the way a synchronous loop does) and
+# points skyward at tcp:127.0.0.1:1234.
+default = []
+usb = []
+
+[dependencies]
+thiserror.workspace = true

@@ -9,6 +9,7 @@
 //! forty times slower, which is enough to make you optimize the wrong thing.
 
 use adsb_dsp::registry;
+use adsb_source::{SourceOptions, SourceSpec};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -40,30 +41,50 @@ fn main() {
         i += 2;
     }
 
-    let iq = std::fs::read(path).unwrap_or_else(|e| {
-        eprintln!("cannot read {path}: {e}");
-        std::process::exit(1);
+    // Stream rather than slurp. The golden fixture is 864 MB, and a live
+    // receiver never has the whole capture in hand -- going through the same
+    // source the server uses means this exercises the real carry-over path.
+    let spec = SourceSpec::parse(&format!("file:{path}")).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
     });
+    let mut source =
+        adsb_source::open(&spec, &SourceOptions::for_benchmark(rate)).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
 
     let mut pipe = registry::build(&set, rate).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2);
     });
 
-    let seconds = (iq.len() / 2) as f64 / f64::from(rate);
-    println!("{path}");
-    println!("  {:.1} s at {:.3} MS/s", seconds, f64::from(rate) / 1e6);
+    println!("{}", source.describe());
     println!("  {set}");
 
-    // Feed in realistic chunks rather than one slab, so this exercises the
-    // same carry-over path the live receiver uses.
     let started = Instant::now();
     let mut found = Vec::new();
-    for chunk in iq.chunks(256 * 1024 * 2) {
-        pipe.feed(chunk, &mut found);
+    let mut buf = vec![0u8; 256 * 1024 * 2];
+    let mut bytes = 0u64;
+    loop {
+        match source.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes += n as u64;
+                pipe.feed(&buf[..n], &mut found);
+            }
+            Err(e) if e.is_end_of_stream() => break,
+            Err(e) => {
+                eprintln!("read error: {e}");
+                break;
+            }
+        }
     }
     pipe.finish(&mut found);
     let elapsed = started.elapsed().as_secs_f64();
+    let samples = bytes / 2;
+    let seconds = samples as f64 / f64::from(rate);
+    println!("  {:.1} s at {:.3} MS/s", seconds, f64::from(rate) / 1e6);
 
     let stats = pipe.stats();
     println!("\ndemodulation");
@@ -81,7 +102,7 @@ fn main() {
         "  realtime factor   {:.1}x  ({:.2} s wall, {:.0} ns/sample)",
         seconds / elapsed,
         elapsed,
-        elapsed * 1e9 / (iq.len() / 2) as f64
+        elapsed * 1e9 / samples.max(1) as f64
     );
 
     println!("\n  downlink formats at candidate stage:");
