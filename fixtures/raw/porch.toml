@@ -1,0 +1,113 @@
+# Porch fixture — the first capture taken outdoors, and the hardest tier.
+#
+# Captured from the front porch in Troy, PA: the antenna in open air with
+# nothing overhead, rather than behind a wall or a window. It hears 2.6x what
+# `golden` does from the same hardware and settings, which makes it the more
+# honest optimization target — a detector tuned on 517 messages is being tuned
+# on a signal-starved recording.
+#
+# It is also the first fixture whose receiver position is recorded, so the
+# range gate and CPR can be evaluated against it properly. See `[receiver]`.
+
+schema = 1
+name = "porch"
+
+[file]
+path = "porch.cu8"
+sha256 = "a43b37d6085ba396e58faa83afb465bb36d99ad3a320f0d29858da7b74a86642"
+bytes = 864_000_000
+format = "cu8"              # interleaved unsigned 8-bit I,Q -- rtl_sdr native
+
+[capture]
+started_utc = "2026-08-15T15:38:36Z"
+ended_utc   = "2026-08-15T15:41:37Z"
+duration_s  = 180
+center_freq_hz = 1_090_000_000
+sample_rate_hz = 2_400_000  # exact on this hardware: 28.8 MHz / 12
+gain_db = 49.6              # tuner max for this R820T
+gain_mode = "manual"
+agc = "unknown"             # rtl_sdr does not disable the RTL2832 digital AGC
+bias_tee = false
+tool = "rtl_sdr (homebrew)"
+
+[hardware]
+sdr = "Realtek RTL2838UHIDIR"   # as reported by rtl_test
+tuner = "Rafael Micro R820T"
+# TODO: confirm before relying on these for a placement comparison. The capture
+# was taken during a session where the antenna had just been reconnected, and
+# the physical configuration was not recorded at the time. Everything above is
+# read back from the device; everything here is not.
+antenna = "unrecorded"
+antenna_orientation = "unrecorded"
+mount = "front porch, outdoors, open sky, nothing overhead"
+
+[receiver]
+# Recorded, unlike the earlier fixtures. This matters: `bench` evaluates the
+# range gate against the *configured* station, so scoring an Ottawa capture
+# from a Troy config drops `golden` from 72 positions to 8 with an identical
+# message count and digest -- which reads as a decode regression and is not
+# one. A fixture that carries its own position can be scored from anywhere.
+#
+# Town centre to three decimals, not the exact porch: ~100 m is far more than
+# local CPR (same ~670 km zone) or the 400 km range gate need.
+lat = 41.788
+lon = -76.790
+altitude_m = 340.0
+unset = false
+
+# The scoreboard baseline: what the `baseline` impl set actually produces.
+# Regenerate with:
+#   skyward bench
+[expected]
+baseline_candidates = 2151
+baseline_crc_ok = 1350
+baseline_aircraft = 15
+baseline_positions = 105
+baseline_msg_per_min = 450.0
+baseline_yield = 0.628
+digest = "fnv1a64:21f470baef457bdd"
+
+# No `[headroom]` block. `golden` carries one because two alternatives were
+# measured against it with the exploratory tools in `reference/`; nothing
+# equivalent has been run on this file, and inventing a target would defeat
+# the purpose of having one. Measure, then write it down.
+
+[notes]
+text = """
+Outdoors is worth more than any change to the software so far.
+
+Same hardware, same 2.4 MS/s and 49.6 dB gain, baseline impl set:
+
+  desk.cu8    (interior room, Ottawa)     83.5 msg/min    3 aircraft
+  golden.cu8  (top-floor window, Ottawa) 172.3 msg/min    7 aircraft
+  porch.cu8   (outdoors, Troy)           450.0 msg/min   15 aircraft
+
+Live, from the same porch position, the receiver sustained 430 msg/min over 38
+minutes with a maximum range of 92.3 nm.
+
+TWO THINGS TO KNOW BEFORE USING THIS AS A TARGET.
+
+First, the ghost ratio has a floor here. `golden` and `desk` both score 0.000;
+this file scores 0.133, meaning about one ICAO address in seven is seen exactly
+once and never with a position. That is what hearing more marginal traffic
+looks like -- distant aircraft at the edge of detection produce single-hit
+addresses -- and it is a property of the recording, not of a decoder inventing
+aircraft. The guard compares a change against the *file's own* baseline, so
+0.133 is the number to beat, not 0.000. Comparing porch runs against golden's
+ghost ratio would fail every honest improvement.
+
+Second, the positions figure is only meaningful because `[receiver]` above is
+filled in. The 400 km range gate rejects everything when the configured station
+is somewhere else, which is exactly what happens if you score `golden` from a
+Troy config.
+
+WHY THIS IS THE BETTER TARGET.
+
+More traffic means more marginal traffic, which is where the detector actually
+gets tested. `golden` has 879 candidate preambles; this has 2151. The baseline
+recovers 62.8% of them, slightly better than golden's 58.8% -- not because the
+detector improved, but because a stronger signal makes each candidate easier to
+slice. That relationship is the thing to watch: a better detector will propose
+more marginal candidates and push yield DOWN while messages go UP. Yield is
+reported and never optimized.
+"""
