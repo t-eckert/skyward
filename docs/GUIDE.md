@@ -391,6 +391,7 @@ adsb-source   where samples come from       ← depends on nothing but std
 adsb-track    frames → aircraft             ← depends on core
 adsb-store    aircraft → SQLite             ← depends on core, track
 adsb-server   the binary                    ← depends on all
+client/       the web interface             ← compiled *into* adsb-server
 ```
 
 The dependency direction is deliberate: `adsb-core` and `adsb-dsp` have no I/O
@@ -587,7 +588,7 @@ assert it survives — for *both* anchor frames, over a global grid
 tests failed, including one reporting a 446 km error, while the canonical
 even-anchor vector still passed.
 
-The tolerance constant at `cpr.rs:283-292` is worth reading: 30 m, chosen
+The tolerance constant at `cpr.rs:287-296` is worth reading: 30 m, chosen
 because CPR's own quantisation is ~5 m at the equator rising to ~21 m near the
 poles where $N_L$ collapses to 1, and the bug class being guarded against is
 kilometres.
@@ -635,7 +636,7 @@ L2 cache. Handing `f32` across this seam would foreclose the single most
 instructive optimisation in the project.
 
 Full scale is $127.5\sqrt2 = 180.312$, mapped to `u16::MAX`
-(`adsb-dsp/src/lib.rs:84-87`). The test at `adsb-dsp/src/lib.rs:107-116` asserts the extreme input lands
+(`adsb-dsp/src/lib.rs:84-87`). The test at `adsb-dsp/src/lib.rs:108-117` asserts the extreme input lands
 exactly at the top without wrapping — an overflow there would turn the loudest
 aircraft into the quietest.
 
@@ -825,7 +826,7 @@ invisible in the signal statistics** — it just quietly decodes nothing and loo
 exactly like a bad demodulator.
 
 `FileSource::read` at `file.rs:126-183` carries the stray byte forward. Worth
-reading the loop at `file.rs:139-171` carefully: my first version stashed the
+reading the loop at `file.rs:145-171` carefully: my first version stashed the
 byte and returned `Ok(0)`, which the caller cannot distinguish from EOF, so a
 reader dribbling one byte at a time ended the stream immediately. The fix is
 the `if filled >= 2 { break }` in the `Ok(n)` arm at `file.rs:165-167` — keep reading until a
@@ -858,7 +859,7 @@ by table index, `0x08` AGC, `0x0E` bias tee. Without these a gain sweep over
 rtl_tcp is impossible. Note the ordering at `tcp.rs:261-274`: manual mode must
 be sent **before** the value, or the gain is silently ignored.
 
-**A read timeout.** `dial()` at `tcp.rs:113-116` sets one, with the comment
+**A read timeout.** `dial()` at `tcp.rs:110-114` sets one, with the comment
 explaining why: without it a wedged server blocks the process forever with no
 log line — the single worst failure mode on a box you cannot log into. The test
 at `tcp.rs:470-497` stands up a server that sends a header then goes silent and
@@ -960,7 +961,7 @@ which rewrites the entire database. Without it, retention deletes rows but
 never returns pages to the filesystem. It's a one-shot decision that is easy to
 miss and expensive to get wrong.
 
-Also note the **composite index** `(icao, ts_ms)` at `schema.rs:47-51`. Every
+Also note the **composite index** `(icao, ts_ms)` at `schema.rs:50-54`. Every
 history query is "this aircraft, ordered by time"; two separate single-column
 indexes each serve half of it and SQLite can only use one. The test at
 `schema.rs:171-187` runs `EXPLAIN QUERY PLAN` and asserts the index is actually
@@ -977,7 +978,7 @@ and only the second is useful at arm's length.
 
 Three checks exist because of specific failure modes:
 
-**The clock** (`doctor.rs:214-240`). A Raspberry Pi has no real-time clock and
+**The clock** (`doctor.rs:246-272`). A Raspberry Pi has no real-time clock and
 boots in 1970. Every timestamp is then garbage, `?max_age=` filters return
 nothing, and the whole system looks like a dead radio. Three lines of code, and
 almost always the last thing anyone suspects.
@@ -987,7 +988,7 @@ almost always the last thing anyone suspects.
 configured rate. **Dropping samples and hearing nothing are identical in the
 message count**, and one of them is a software problem you can fix.
 
-**The offline self-test** (`check_self_test`, `doctor.rs:291-360`). Decode the synthetic frames in
+**The offline self-test** (`check_self_test`, `doctor.rs:323-382`). Decode the synthetic frames in
 memory and assert the expected set comes back. This proves the decode chain is
 correct on the Pi's own CPU with no antenna attached, separating "bad build" —
 a bad cross-compile, a corrupt binary — from "bad reception", *before* you go
@@ -1018,6 +1019,15 @@ It's printed with "(report, never optimize)" beside it.
   never located. Real aircraft transmit twice a second, so a singleton is the
   signature of a false CRC accept. This is what catches error correction
   inventing aircraft.
+
+  **But it has a floor that depends on the recording, not on the decoder.**
+  `golden` and `desk` both score 0.000; `porch` scores 0.133 — about one
+  address in seven. Nothing is inventing aircraft there. A recording that
+  hears further hears *more marginal traffic*, and an aircraft caught at the
+  very edge of detection legitimately produces one CRC-clean message and then
+  nothing. The guard is only meaningful against the same fixture's own
+  baseline. Compare a porch run against golden's 0.000 and you will fail every
+  honest improvement you ever make.
 - `realtime_factor` — an implementation finding 30% more at 0.8× realtime
   cannot keep up on a Pi and is a regression.
 
@@ -1032,8 +1042,8 @@ compared to a Pi digest.
 
 On a machine you cannot log into, the question is never "what is the config",
 it's **"did my edit take effect"**. A dump that prints values but not origins
-cannot answer that. `Sourced<T>` at `config.rs:53-77` carries the layer each
-value came from, and `print_resolved()` at `config.rs:346-406` shows it:
+cannot answer that. `Sourced<T>` at `config.rs:141-158` carries the layer each
+value came from, and `print_resolved()` at `config.rs:437-495` shows it:
 
 ```
 receiver.lat        45.412      $SKYWARD_RECEIVER_LAT
@@ -1042,17 +1052,17 @@ sample_rate_hz      2400000     default
 
 Two things fail rather than default:
 
-**Unknown keys.** `#[serde(deny_unknown_fields)]` at `config.rs:81` and
-`config.rs:98`. A typo'd `recevier.lat` silently ignored is the classic
+**Unknown keys.** `#[serde(deny_unknown_fields)]` at `config.rs:169` and
+`config.rs:186`. A typo'd `recevier.lat` silently ignored is the classic
 blind-box failure — you edit, restart, nothing changes, and there is no signal
 at all.
 
 **A missing receiver position.** Defaulting to `0.0, 0.0` puts the station in
 the Gulf of Guinea, which makes the range gate reject every aircraft on earth —
 a total outage that looks like bad reception. Half a coordinate is refused too
-(`config.rs:320-331`).
+(`config.rs:418-424`).
 
-Validation at `config.rs:283-336` explains *why* rather than just refusing:
+Validation at `config.rs:374-427` explains *why* rather than just refusing:
 the sample-rate error says "a bit is one microsecond long, so below 2 samples
 per microsecond the two halves of a bit cannot be told apart".
 
@@ -1077,6 +1087,237 @@ The SSE stream is at `api.rs` (`stream`). SSE rather than WebSocket: the
 traffic is one-way, `EventSource` reconnects by itself, it survives proxies,
 and it's about five lines in SvelteKit. There are no client-to-server messages,
 so an upgrade handshake would buy nothing.
+
+
+## 4.7 `registry.rs` — how a second implementation lands beside the first
+
+This is the mechanism the whole project is built around, so it is worth
+understanding before you write any DSP at all. The premise in the README —
+"a new implementation lands *beside* the old one instead of replacing it" —
+is implemented here, in 246 lines.
+
+### 4.7.1 The shape
+
+Each stage is a `Box<dyn Trait>` chosen by name at runtime, not a generic
+parameter chosen at compile time. Four parallel structures per stage:
+
+| | |
+|---|---|
+| a trait | `Magnitude`, `PreambleDetector`, `BitSlicer`, `FrameValidator` |
+| a `*_NAMES` table | `(name, one-line description)`, drives `--list-impls` |
+| a constructor `fn` | `detector(name, sample_rate) -> Result<Box<dyn …>>` |
+| a `match` arm | maps the name to the type |
+
+`ImplSet` is one name per stage; `build()` turns it into a `Pipeline`.
+
+Dynamic dispatch costs a vtable lookup per *call*, and the calls are per-buffer
+rather than per-sample — `compute()` is handed a whole slice. So the indirection
+is amortised over ~65k samples and does not show up in `ns/sample`. That is why
+the seam can be this cheap.
+
+### 4.7.2 Why names rather than types
+
+Because the comparison you actually want is against **your own previous
+attempt**, not against the baseline. `correlator-v3` against `correlator-v2` is
+the interesting question by week three, and a compile-time selection would mean
+rebuilding to answer it — or worse, deleting v2.
+
+Three invariants make that safe, each with a test:
+
+- **Unknown names are fatal**, never a silent fallback. `unknown_names_fail_
+  loudly_and_list_the_alternatives` asserts the error echoes your typo *and*
+  lists the valid names. On a Pi, "it ran but quietly used something else" is
+  exactly the failure that costs an evening.
+- **Every registered name builds.** `every_registered_name_actually_builds`
+  walks the `*_NAMES` tables and constructs each one, so adding a row and
+  forgetting the `match` arm fails on your laptop rather than on the Pi.
+- **Reported names match registry keys.** `names_reported_by_impls_match_their_
+  registry_keys` — otherwise a run record would lie about what produced it,
+  which quietly poisons every comparison you make afterwards.
+
+### 4.7.3 Adding one, concretely
+
+Say you are writing the correlator from §5.1.
+
+1. **Write the type** in `detect.rs` and implement `PreambleDetector`
+   (`detect.rs`, the trait). Five methods: `name`, `describe`, `reset`,
+   `lookback`, `detect`.
+
+2. **Honour the buffer-invariance contract.** `detect()` gets `(mag, from, to,
+   out)` and must emit candidates whose offsets lie in `[from, to)`, depending
+   only on the samples and not on how they were chunked. Emit outside the
+   window and you duplicate or drop messages as a function of buffer size.
+   `output_is_independent_of_buffer_size` (`pipeline.rs:356-382`) will catch it.
+
+3. **Declare your lookback.** If you correlate over a 16-sample template you
+   read samples before `from`; return that from `lookback()` and the pipeline
+   guarantees they are there (except at stream start).
+
+4. **Register it**: one row in `DETECTOR_NAMES`, one arm in `detector()`.
+
+5. **Fill in `Candidate`.** `offset` and `score` at minimum. A correlator can
+   also give you `frac` — sub-sample refinement in `[-0.5, 0.5]`. At 2.4 MS/s a
+   bit is 2.4 samples wide, so half a sample of misalignment costs real margin
+   on every one of 112 bits, and a correlator that interpolates its peak is the
+   only thing that can tell you where the edge actually was. `score` is
+   explicitly **only comparable within one implementation** — never threshold
+   on it across two.
+
+### 4.7.4 The gap you will hit immediately
+
+`--list-impls` prints its stages as `magnitude (--mag)`, `detector (--detect)`
+and so on, and the module docs give this example:
+
+```text
+skyward bench --detect correlator-v2 --compare runs/baseline.json
+```
+
+**Those flags do not exist.** `skyward bench --detect naive` fails with
+`unexpected argument '--detect' found`; only `--impl-set` is wired up, and the
+only preset is `baseline`. Verified against the shipped binary.
+
+So today the actual route is to add a preset in `ImplSet::preset()` — there is
+already a comment marking the spot (`// Add "thomas" here once there is
+something to put in it`) — and select it with `--impl-set`:
+
+```rust
+"thomas" => Some(ImplSet { detector: "correlator-v2".into(), ..Self::baseline() }),
+```
+
+```bash
+skyward bench --impl-set thomas --compare runs/baseline.json
+```
+
+That works, and it has the side benefit of naming the *combination* you ran,
+which is what a run record should record anyway. But it means one preset per
+experiment, which gets tedious fast. Adding four optional per-stage flags to
+the CLI is a small change and would make the registry behave the way its own
+documentation already claims.
+
+---
+
+## 4.8 `web.rs` and `client/` — the interface
+
+### 4.8.1 Why the client is inside the binary
+
+`web.rs` embeds `client/build` with `rust-embed` and serves it as the router's
+fallback. Same reasoning as one binary rather than a decoder-plus-API pair: two
+artifacts means two ways to deploy the wrong version. A `--web-root` on the Pi
+would let a six-week-old client sit in front of a fresh server, reading fields
+the API no longer sends, with nothing anywhere reporting the disagreement.
+
+Consequences worth knowing:
+
+- **Deployment is `scp skyward pi:` and nothing else.** `skyward --version`
+  describes the interface as well as the decoder, and `doctor` reports what is
+  actually inside (`web.client   21 files, 1642 KiB embedded`).
+- **A checkout that has never run `npm run build` still compiles.** `build.rs`
+  writes a placeholder page naming the missing command, so `cargo build` fails
+  only for real reasons.
+- **`/api/*`, `/healthz` and `/readyz` are excluded from the fallback.** Without
+  that a typo'd endpoint returned `200` and a page of HTML, so `fetch` resolved
+  happily and then died parsing `<!doctype html>` as JSON. A router fallback
+  catches *every* unmatched path, including the ones you meant to 404.
+- **`index.html` is never cached; hashed assets are cached for a year.** A
+  cached entry point points at asset filenames that no longer exist after an
+  upgrade, and the app fails to boot.
+
+### 4.8.2 Two silent failures the client had to learn about
+
+Both are worth internalising because they are the same species of bug as
+`stalled` versus `ok` on the server: **a thing that looks healthy because
+nothing raised an error.**
+
+**A dead stream does not necessarily raise one.** When the receiver was stopped
+behind a dev proxy the socket stayed open, `onerror` never fired, and the view
+reported `STREAMING` over a sixteen-second-old snapshot showing `heard 0.1 s` —
+the ages looked live because they are computed against the server clock carried
+in the envelope, and that had stopped advancing too. The fix is a staleness
+watchdog: the stream publishes once a second, and six seconds of silence is
+treated as death regardless of what the socket says. Silence is failure; only
+an arriving snapshot proves liveness.
+
+**A live stream only proves the *server* is alive.** With the antenna
+unplugged, snapshots kept arriving exactly on schedule — they were simply
+empty. The server knew (`status: stalled`); nothing asked it. The health poll
+now drives a third state, `NO SIGNAL`, distinct from a dropped connection,
+because the operator action is completely different: one is "wait", the other
+is "go look at the cable".
+
+### 4.8.3 The plot
+
+Aircraft are drawn over an OpenFreeMap vector basemap as a single GeoJSON
+source with a symbol layer — not DOM markers, which are a different performance
+class once there are a hundred of them updating every second. `icon-rotate`
+reads `track_deg` from the feature, and MapLibre's own collision handling does
+the label de-confliction.
+
+The range rings survive on top of the map, as true geodesic circles about the
+station. Geography answers "where is that aircraft"; the rings answer "how far
+out am I hearing, and in which direction", which is a question about the
+antenna and the only one this project is really about.
+
+---
+
+## 4.9 `fixtures/` — the recordings, and the contract around them
+
+### 4.9.1 Why the sidecar exists
+
+The `.cu8` files are gitignored — 2.2 GB of IQ does not belong in git — but
+every capture has a **committed `.toml` sidecar**. An unlabelled IQ file with an
+assumed sample rate is a silent multi-evening bug: at the wrong rate the
+preamble template is the wrong width, detection collapses, and nothing in the
+output says why.
+
+Three fixtures, all 2.4 MS/s and 49.6 dB on the same hardware:
+
+| fixture | duration | messages | aircraft | positions | msg/min |
+|---|---|---|---|---|---|
+| `desk` | 120 s | 167 | 3 | 5 | 83.5 |
+| `golden` | 180 s | 517 | 7 | 8 | 172.3 |
+| `porch` | 180 s | **1350** | **15** | **105** | **450.0** |
+
+`porch` is the outdoor capture and the better optimization target: 2151
+candidate preambles against golden's 879, so there is far more marginal signal
+for a detector to actually be tested on. A detector tuned on 517 messages is
+being tuned on a signal-starved recording.
+
+### 4.9.2 The receiver-position trap
+
+`bench` evaluates the range gate against the **configured** station, not
+against wherever the capture was taken. Scoring the Ottawa fixtures from a Troy
+config drops `golden` from 72 positions to 8 — with an identical message count
+and an identical digest.
+
+That is the range gate working correctly on the wrong input, and it reads
+exactly like a decode regression. `porch.toml` is the first sidecar to record
+its own `[receiver]` block for this reason. Making `bench` prefer the sidecar's
+position over the operator's config is an open item in Known gaps.
+
+### 4.9.3 Capturing your own
+
+```bash
+# rtl_tcp holds the device; stop it and skyward first, or rtl_sdr gets
+# "usb_claim_interface error -3".
+pkill -f rtl_tcp; pkill -f "skyward run"
+
+# -n counts *samples*; each is 2 bytes (I and Q). 180 s at 2.4 MS/s:
+#   180 × 2_400_000 = 432_000_000 samples = 864_000_000 bytes
+rtl_sdr -f 1090000000 -s 2400000 -g 49.6 -n 432000000 fixtures/raw/mine.cu8
+
+shasum -a 256 fixtures/raw/mine.cu8
+skyward bench fixtures/raw/mine.cu8      # fills in [expected]
+```
+
+Then write the sidecar. Copy `porch.toml` as the template — it is the one with
+`[receiver]` filled in. Record the UTC start and end, and be honest in
+`[hardware]` about anything you did not actually measure: `porch.toml` marks
+its antenna configuration `"unrecorded"` rather than guessing, because a
+placement comparison against a guessed configuration is worthless.
+
+Leave `[headroom]` out unless you have measured it. `golden` carries one
+because two alternatives were genuinely run against it; inventing a target
+defeats the purpose of having one.
 
 ---
 
@@ -1320,15 +1561,35 @@ of it.
 yourself; it takes about ten lines of algebra and it's satisfying. Then read
 `cpr.rs` and the round-trip test.
 
+**Session 3.5: read the registry before writing any DSP.** §4.7. It is 246
+lines and it is the mechanism the whole project depends on — how a new
+implementation lands beside the old one rather than replacing it. Note the gap
+in §4.7.4 before you plan around the flags in `--list-impls`: they are not
+implemented, and the route today is a preset plus `--impl-set`.
+
 **Session 4: build the correlator.** This is the big win (~4×). The five
-weaknesses are enumerated at `detect.rs:36-59`. Add it to the registry, run
-`skyward bench --compare runs/baseline.json`, and sweep your threshold to plot
-the ROC curve rather than reporting a single point.
+weaknesses are enumerated at `detect.rs:36-59`. Register it (§4.7.3), then
+
+```bash
+skyward bench --impl-set thomas --compare runs/baseline.json
+```
+
+Sweep your threshold to plot the ROC curve rather than reporting a single
+point. **Score it on `porch`, not `golden`** — 2151 candidates against 879 is
+far more marginal signal to be tested on, and a detector tuned on a
+signal-starved recording learns the wrong lesson. Watch `ghost_icao_ratio`
+against *that fixture's own* baseline of 0.133, not against zero (§4.6.2).
 
 **Session 5: the slicer, then error correction.** Integrating over half-bits is
 worth ~17% and is easy. Emitting real confidence is what unlocks safe two-bit
 correction, so do them in that order — and watch `ghost_icao_ratio` while you
 do.
+
+**Session 6: capture your own fixture.** §4.9.3. Everything above is
+measured against recordings someone else made; a capture from your own antenna
+in your own sky is the point at which the scoreboard starts describing *your*
+receiver. Outdoors beat every indoor placement by a factor of 2.6 (§4.9.1),
+which is a larger improvement than the correlator is expected to deliver.
 
 **Before any of that, if the dongle is to hand: the gain sweep.** It's stage 0
 in the plan for a reason. Max gain is very likely not optimal — it amplifies
