@@ -49,6 +49,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/aircraft/{icao}/track", get(aircraft_track))
         .route("/api/v1/stream", get(stream))
         .with_state(state)
+        // The client, compiled into this binary. A fallback rather than a
+        // route, so it only ever answers paths the API did not claim: an
+        // unknown `/api/...` path still gets a real 404 instead of a page of
+        // HTML, which is the difference between a readable client error and
+        // twenty minutes wondering why `fetch` returned `<!doctype html>`.
+        .fallback(crate::web::handler)
 }
 
 // ---------------------------------------------------------------- DTOs -----

@@ -187,6 +187,26 @@ fn check_config(report: &mut Report, config: &Config) {
         ),
     }
 
+    // The client is compiled in, so whether it is really there is a property
+    // of this binary and belongs in the same report as the build. Otherwise
+    // the only way to find out is to open a browser, which on a Pi you are
+    // deliberately not doing.
+    let (files, bytes) = crate::web::footprint();
+    if crate::web::is_built() {
+        report.add(
+            Level::Pass,
+            "web.client",
+            format!("{files} files, {} KiB embedded", bytes / 1024),
+        );
+    } else {
+        report.add(
+            Level::Warn,
+            "web.client",
+            "not built into this binary; the API works but the web interface \
+             is a placeholder. Run `cd client && npm run build`, then rebuild.",
+        );
+    }
+
     // A `.env` only applies when you run from the directory above it, so say
     // which one was found rather than leaving the operator to guess why a
     // value they set is missing.

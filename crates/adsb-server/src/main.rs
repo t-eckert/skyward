@@ -11,6 +11,7 @@ mod bench;
 mod config;
 mod doctor;
 mod run;
+mod web;
 
 use clap::{Parser, Subcommand};
 use config::{CliOverrides, Config};
