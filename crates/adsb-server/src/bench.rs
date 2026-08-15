@@ -103,13 +103,8 @@ pub fn run(config: &Config, args: &BenchArgs) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let set = match registry::ImplSet::preset(&config.impl_set) {
-        Some(s) => s,
-        None => {
-            eprintln!("unknown impl set '{}'", *config.impl_set);
-            return ExitCode::from(2);
-        }
-    };
+    // Already validated at startup, names included, so this cannot fail here.
+    let set = config.impls();
 
     let mut results = Vec::new();
     for path in &fixtures {

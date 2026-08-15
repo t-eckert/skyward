@@ -44,6 +44,13 @@ pub enum Origin {
     DotEnv(&'static str),
     Env(&'static str),
     Cli,
+    /// Expanded from a named `impl_set` preset.
+    ///
+    /// A stage you did not choose individually still came from *somewhere*,
+    /// and "default" would be a lie — change the preset and the value changes
+    /// with it. Printing the preset name is what makes `--detect` visibly
+    /// different from the stage it replaced.
+    Preset(String),
 }
 
 impl fmt::Display for Origin {
@@ -54,6 +61,7 @@ impl fmt::Display for Origin {
             Origin::DotEnv(name) => write!(f, "${name} (.env)"),
             Origin::Env(name) => write!(f, "${name}"),
             Origin::Cli => write!(f, "command line"),
+            Origin::Preset(name) => write!(f, "impl_set '{name}'"),
         }
     }
 }
@@ -164,6 +172,65 @@ impl<T> std::ops::Deref for Sourced<T> {
     }
 }
 
+/// The four stage names the file supplied, lifted out before `file` is
+/// consumed field by field.
+#[derive(Debug, Default)]
+struct FileStages {
+    magnitude: Option<String>,
+    detector: Option<String>,
+    slicer: Option<String>,
+    validator: Option<String>,
+}
+
+/// The four stages, each resolved with its own provenance.
+#[derive(Debug, Clone)]
+struct StageNames {
+    magnitude: Sourced<String>,
+    detector: Sourced<String>,
+    slicer: Sourced<String>,
+    validator: Sourced<String>,
+}
+
+impl StageNames {
+    /// Expand the preset, then layer file, environment and flags over it.
+    ///
+    /// An unknown preset expands to the baseline here rather than erroring:
+    /// `validate` reports that, and reporting it once with the list of valid
+    /// names beats failing twice with two different messages.
+    fn resolve(
+        impl_set: &Sourced<String>,
+        file: &FileStages,
+        file_origin: &Origin,
+        cli: &CliOverrides,
+    ) -> Self {
+        let base = adsb_dsp::registry::ImplSet::preset(impl_set)
+            .unwrap_or_else(adsb_dsp::registry::ImplSet::baseline);
+        let from_preset = Origin::Preset(impl_set.value.clone());
+
+        let layer = |value: String,
+                     file_value: &Option<String>,
+                     env: &'static str,
+                     cli_value: &Option<String>| {
+            Sourced::new(value, from_preset.clone())
+                .or_layer(file_value.clone(), file_origin.clone())
+                .or_layer(env_string(env), env_origin(env))
+                .or_layer(cli_value.clone(), Origin::Cli)
+        };
+
+        StageNames {
+            magnitude: layer(base.magnitude, &file.magnitude, "SKYWARD_MAG", &cli.magnitude),
+            detector: layer(base.detector, &file.detector, "SKYWARD_DETECT", &cli.detector),
+            slicer: layer(base.slicer, &file.slicer, "SKYWARD_SLICE", &cli.slicer),
+            validator: layer(
+                base.validator,
+                &file.validator,
+                "SKYWARD_VALIDATE",
+                &cli.validator,
+            ),
+        }
+    }
+}
+
 /// The on-disk file. Every field optional; unknown fields rejected.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -178,6 +245,13 @@ pub struct FileConfig {
     pub cors_origins: Option<Vec<String>>,
     pub log_format: Option<String>,
     pub impl_set: Option<String>,
+    /// Per-stage overrides, layered on top of whichever preset `impl_set`
+    /// names. Set one to swap a single stage without defining a whole preset
+    /// for every experiment.
+    pub magnitude: Option<String>,
+    pub detector: Option<String>,
+    pub slicer: Option<String>,
+    pub validator: Option<String>,
     #[serde(default)]
     pub receiver: FileReceiver,
 }
@@ -200,6 +274,10 @@ pub struct CliOverrides {
     pub db_path: Option<String>,
     pub log_format: Option<String>,
     pub impl_set: Option<String>,
+    pub magnitude: Option<String>,
+    pub detector: Option<String>,
+    pub slicer: Option<String>,
+    pub validator: Option<String>,
 }
 
 /// The current schema version of the config file format.
@@ -230,6 +308,10 @@ pub struct Config {
     pub cors_origins: Sourced<Vec<String>>,
     pub log_format: Sourced<String>,
     pub impl_set: Sourced<String>,
+    pub magnitude: Sourced<String>,
+    pub detector: Sourced<String>,
+    pub slicer: Sourced<String>,
+    pub validator: Sourced<String>,
     pub receiver_lat: Sourced<Option<f64>>,
     pub receiver_lon: Sourced<Option<f64>>,
     pub receiver_alt_m: Sourced<f64>,
@@ -250,7 +332,7 @@ fn env_parsed<T: std::str::FromStr>(name: &'static str) -> Option<T> {
 impl Config {
     /// Resolve defaults, then file, then environment, then CLI.
     pub fn resolve(path: Option<&str>, cli: &CliOverrides) -> Result<Config, ConfigError> {
-        let (file, file_origin) = match path {
+        let (mut file, file_origin) = match path {
             Some(p) if Path::new(p).exists() => {
                 let text = std::fs::read_to_string(p).map_err(|e| ConfigError::Read {
                     path: p.to_string(),
@@ -278,6 +360,26 @@ impl Config {
             }
             None => (FileConfig::default(), Origin::Default),
         };
+
+        let file_stage = FileStages {
+            magnitude: file.magnitude.take(),
+            detector: file.detector.take(),
+            slicer: file.slicer.take(),
+            validator: file.validator.take(),
+        };
+        // The preset resolves first: it supplies the base value for each of the
+        // four stages, which per-stage overrides then layer on top of. Doing it
+        // in one struct literal is not possible -- the stages depend on it.
+        let impl_set = Sourced::new("baseline".to_string(), Origin::Default)
+            .or_layer(file.impl_set, file_origin.clone())
+            .or_layer(
+                env_string("SKYWARD_IMPL_SET"),
+                env_origin("SKYWARD_IMPL_SET"),
+            )
+            .or_layer(cli.impl_set.clone(), Origin::Cli);
+
+        let stage = StageNames::resolve(&impl_set, &file_stage, &file_origin, cli);
+
 
         let config = Config {
             source: Sourced::new("tcp:127.0.0.1:1234".to_string(), Origin::Default)
@@ -333,13 +435,12 @@ impl Config {
                 )
                 .or_layer(cli.log_format.clone(), Origin::Cli),
 
-            impl_set: Sourced::new("baseline".to_string(), Origin::Default)
-                .or_layer(file.impl_set, file_origin.clone())
-                .or_layer(
-                    env_string("SKYWARD_IMPL_SET"),
-                    env_origin("SKYWARD_IMPL_SET"),
-                )
-                .or_layer(cli.impl_set.clone(), Origin::Cli),
+            impl_set: impl_set.clone(),
+
+            magnitude: stage.clone().magnitude,
+            detector: stage.clone().detector,
+            slicer: stage.clone().slicer,
+            validator: stage.validator,
 
             receiver_lat: Sourced::new(None, Origin::Default)
                 .or_layer(file.receiver.lat.map(Some), file_origin.clone())
@@ -401,6 +502,13 @@ impl Config {
             )));
         }
 
+        // Every stage name, not just the preset. A typo in `--detect` has to
+        // fail here, before the radio is opened, with the alternatives listed
+        // -- "it ran but quietly used something else" is the failure that
+        // wastes an evening on a machine you cannot debug interactively.
+        adsb_dsp::registry::check(&self.impls())
+            .map_err(|e| ConfigError::Invalid(e.to_string()))?;
+
         // Latitude and longitude must arrive together or not at all.
         match (*self.receiver_lat, *self.receiver_lon) {
             (Some(lat), Some(lon)) => {
@@ -424,6 +532,20 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// The fully expanded implementation selection.
+    ///
+    /// Every consumer takes this rather than re-expanding the preset itself,
+    /// so a per-stage override cannot be honoured in one place and silently
+    /// dropped in another.
+    pub fn impls(&self) -> adsb_dsp::registry::ImplSet {
+        adsb_dsp::registry::ImplSet {
+            magnitude: self.magnitude.value.clone(),
+            detector: self.detector.value.clone(),
+            slicer: self.slicer.value.clone(),
+            validator: self.validator.value.clone(),
+        }
     }
 
     pub fn receiver(&self) -> Option<(f64, f64)> {
@@ -469,6 +591,18 @@ impl Config {
             "impl_set",
             self.impl_set.value.clone(),
             &self.impl_set.origin,
+        );
+        row(
+            "magnitude",
+            self.magnitude.value.clone(),
+            &self.magnitude.origin,
+        );
+        row("detector", self.detector.value.clone(), &self.detector.origin);
+        row("slicer", self.slicer.value.clone(), &self.slicer.origin);
+        row(
+            "validator",
+            self.validator.value.clone(),
+            &self.validator.origin,
         );
         row(
             "receiver.lat",
@@ -657,6 +791,70 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("carrier-pigeon"), "{err}");
+    }
+
+    #[test]
+    fn stages_expand_from_the_preset_and_say_so() {
+        let c = Config::resolve(None, &CliOverrides::default()).unwrap();
+        assert_eq!(*c.detector, "naive");
+        assert_eq!(c.detector.origin, Origin::Preset("baseline".into()));
+        // "default" would be a lie: change the preset and this changes with it.
+        let dump = c.print_resolved();
+        assert!(dump.contains("impl_set 'baseline'"), "{dump}");
+    }
+
+    /// The reason the flags exist: swap one stage without defining a preset.
+    #[test]
+    fn a_per_stage_flag_overrides_the_preset() {
+        let c = Config::resolve(
+            None,
+            &CliOverrides {
+                detector: Some("naive".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(c.detector.origin, Origin::Cli);
+        // Untouched stages still come from the preset.
+        assert_eq!(c.slicer.origin, Origin::Preset("baseline".into()));
+        assert_eq!(c.impls().detector, "naive");
+    }
+
+    #[test]
+    fn a_stage_can_be_set_from_the_file_too() {
+        let path = write_temp("stage.toml", "detector = \"naive\"\n");
+        let c = Config::resolve(path.as_str().into(), &CliOverrides::default()).unwrap();
+        assert_eq!(c.detector.origin, Origin::File(path));
+    }
+
+    /// A typo in `--detect` must fail before the radio is opened, listing what
+    /// is actually available -- not fall back to the preset's choice.
+    #[test]
+    fn an_unknown_stage_name_is_refused_and_lists_the_alternatives() {
+        let err = Config::resolve(
+            None,
+            &CliOverrides {
+                detector: Some("corelator".into()),
+                ..Default::default()
+            },
+        )
+        .expect_err("a misspelled detector must not be accepted");
+        let message = err.to_string();
+        assert!(message.contains("corelator"), "echo the typo: {message}");
+        assert!(message.contains("naive"), "list alternatives: {message}");
+        assert!(message.contains("detector"), "name the stage: {message}");
+    }
+
+    #[test]
+    fn impls_matches_the_individually_resolved_stages() {
+        let c = Config::resolve(None, &CliOverrides::default()).unwrap();
+        let set = c.impls();
+        assert_eq!(set.magnitude, *c.magnitude);
+        assert_eq!(set.detector, *c.detector);
+        assert_eq!(set.slicer, *c.slicer);
+        assert_eq!(set.validator, *c.validator);
+        // And it must be something the registry will actually build.
+        assert!(adsb_dsp::registry::check(&set).is_ok());
     }
 
     #[test]

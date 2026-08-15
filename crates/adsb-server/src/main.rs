@@ -54,6 +54,27 @@ struct Cli {
     #[arg(long, global = true)]
     impl_set: Option<String>,
 
+    // Per-stage overrides, layered on top of `--impl-set`. The point of the
+    // registry is that a new implementation lands beside the old one, and the
+    // comparison you usually want is against your own previous attempt --
+    // `--detect correlator-v3` against `--detect correlator-v2` -- which
+    // should not require defining a preset for every experiment.
+    /// Magnitude implementation. Overrides the preset's choice.
+    #[arg(long = "mag", global = true, value_name = "NAME")]
+    magnitude: Option<String>,
+
+    /// Preamble detector. Overrides the preset's choice.
+    #[arg(long = "detect", global = true, value_name = "NAME")]
+    detector: Option<String>,
+
+    /// Bit slicer. Overrides the preset's choice.
+    #[arg(long = "slice", global = true, value_name = "NAME")]
+    slicer: Option<String>,
+
+    /// Frame validator. Overrides the preset's choice.
+    #[arg(long = "validate", global = true, value_name = "NAME")]
+    validator: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -100,6 +121,10 @@ fn main() -> std::process::ExitCode {
         db_path: cli.db_path.clone(),
         log_format: cli.log_format.clone(),
         impl_set: cli.impl_set.clone(),
+        magnitude: cli.magnitude.clone(),
+        detector: cli.detector.clone(),
+        slicer: cli.slicer.clone(),
+        validator: cli.validator.clone(),
     };
 
     // Commands that need no configuration at all run before it is resolved, so

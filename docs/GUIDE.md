@@ -1042,8 +1042,8 @@ compared to a Pi digest.
 
 On a machine you cannot log into, the question is never "what is the config",
 it's **"did my edit take effect"**. A dump that prints values but not origins
-cannot answer that. `Sourced<T>` at `config.rs:141-158` carries the layer each
-value came from, and `print_resolved()` at `config.rs:437-495` shows it:
+cannot answer that. `Sourced<T>` at `config.rs:149-166` carries the layer each
+value came from, and `print_resolved()` at `config.rs:559-629` shows it:
 
 ```
 receiver.lat        45.412      $SKYWARD_RECEIVER_LAT
@@ -1052,17 +1052,17 @@ sample_rate_hz      2400000     default
 
 Two things fail rather than default:
 
-**Unknown keys.** `#[serde(deny_unknown_fields)]` at `config.rs:169` and
-`config.rs:186`. A typo'd `recevier.lat` silently ignored is the classic
+**Unknown keys.** `#[serde(deny_unknown_fields)]` at `config.rs:236` and
+`config.rs:260`. A typo'd `recevier.lat` silently ignored is the classic
 blind-box failure — you edit, restart, nothing changes, and there is no signal
 at all.
 
 **A missing receiver position.** Defaulting to `0.0, 0.0` puts the station in
 the Gulf of Guinea, which makes the range gate reject every aircraft on earth —
 a total outage that looks like bad reception. Half a coordinate is refused too
-(`config.rs:418-424`).
+(`config.rs:526-531`).
 
-Validation at `config.rs:374-427` explains *why* rather than just refusing:
+Validation at `config.rs:475-535` explains *why* rather than just refusing:
 the sample-rate error says "a bit is one microsecond long, so below 2 samples
 per microsecond the two halves of a bit cannot be told apart".
 
@@ -1163,36 +1163,59 @@ Say you are writing the correlator from §5.1.
    explicitly **only comparable within one implementation** — never threshold
    on it across two.
 
-### 4.7.4 The gap you will hit immediately
+### 4.7.4 Selecting one
 
-`--list-impls` prints its stages as `magnitude (--mag)`, `detector (--detect)`
-and so on, and the module docs give this example:
-
-```text
-skyward bench --detect correlator-v2 --compare runs/baseline.json
-```
-
-**Those flags do not exist.** `skyward bench --detect naive` fails with
-`unexpected argument '--detect' found`; only `--impl-set` is wired up, and the
-only preset is `baseline`. Verified against the shipped binary.
-
-So today the actual route is to add a preset in `ImplSet::preset()` — there is
-already a comment marking the spot (`// Add "thomas" here once there is
-something to put in it`) — and select it with `--impl-set`:
-
-```rust
-"thomas" => Some(ImplSet { detector: "correlator-v2".into(), ..Self::baseline() }),
-```
+`--impl-set` names a preset; the four per-stage flags override individual
+stages on top of it:
 
 ```bash
-skyward bench --impl-set thomas --compare runs/baseline.json
+skyward bench --detect correlator-v2 --compare runs/baseline.json
+skyward bench --detect correlator-v3 --slice integrating fixtures/raw/porch.cu8
 ```
 
-That works, and it has the side benefit of naming the *combination* you ran,
-which is what a run record should record anyway. But it means one preset per
-experiment, which gets tedious fast. Adding four optional per-stage flags to
-the CLI is a small change and would make the registry behave the way its own
-documentation already claims.
+`--mag`, `--detect`, `--slice`, `--validate`. They are global, so `run`,
+`doctor` and `bench` all take them, and each also has a file key (`detector =
+"..."`) and an environment variable (`SKYWARD_DETECT`) resolved in the usual
+order: preset, then file, then environment, then flag.
+
+This is what makes the registry worth having. Defining a preset per experiment
+is the thing that stops you running the experiment, and the comparison you
+actually want by week three — `correlator-v3` against `correlator-v2` — is one
+flag apart.
+
+**A typo fails before the radio is opened**, listing what exists:
+
+```
+$ skyward bench --detect corelator
+skyward: configuration is invalid: unknown detector implementation
+'corelator'. Available: naive
+```
+
+Never a silent fallback to the preset's choice. On a machine you cannot debug
+interactively, "it ran but quietly used something else" is the failure that
+costs an evening — and it would silently corrupt every comparison made
+afterwards.
+
+**Provenance distinguishes what you chose from what you inherited**, which is
+the whole reason `config.rs` tracks origins:
+
+```
+$ skyward config --detect correlator-v2
+impl_set     baseline         default
+magnitude    naive            impl_set 'baseline'
+detector     correlator-v2    command line
+slicer       naive            impl_set 'baseline'
+validator    crc-only         impl_set 'baseline'
+```
+
+A stage you did not choose still came from *somewhere*, and printing it as
+`default` would be a lie — change the preset and it changes with it.
+
+Note the trap this creates for run records: with a per-stage override in play,
+the preset name alone is actively misleading, because `baseline` is no longer
+the baseline. `doctor` and the bench record both print the full expansion
+(`mag=naive detect=correlator-v2 slice=naive validate=crc-only`) rather than
+the preset name for exactly that reason.
 
 ---
 
@@ -1561,17 +1584,16 @@ of it.
 yourself; it takes about ten lines of algebra and it's satisfying. Then read
 `cpr.rs` and the round-trip test.
 
-**Session 3.5: read the registry before writing any DSP.** §4.7. It is 246
-lines and it is the mechanism the whole project depends on — how a new
-implementation lands beside the old one rather than replacing it. Note the gap
-in §4.7.4 before you plan around the flags in `--list-impls`: they are not
-implemented, and the route today is a preset plus `--impl-set`.
+**Session 3.5: read the registry before writing any DSP.** §4.7. It is the
+mechanism the whole project depends on — how a new implementation lands beside
+the old one rather than replacing it, and how `--detect` selects between them
+without a rebuild.
 
 **Session 4: build the correlator.** This is the big win (~4×). The five
 weaknesses are enumerated at `detect.rs:36-59`. Register it (§4.7.3), then
 
 ```bash
-skyward bench --impl-set thomas --compare runs/baseline.json
+skyward bench --detect correlator-v2 --compare runs/baseline.json
 ```
 
 Sweep your threshold to plot the ROC curve rather than reporting a single

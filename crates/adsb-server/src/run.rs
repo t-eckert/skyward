@@ -280,7 +280,7 @@ pub fn run(config: Config, args: RunArgs) -> ExitCode {
         db_path: config.db_path.value.clone(),
         sample_rate_hz: *config.sample_rate_hz,
         frequency_hz: *config.frequency_hz,
-        impl_set: config.impl_set.value.clone(),
+        impl_set: config.impls().to_string(),
         source_description,
         counters: Arc::clone(&counters),
         store: store.as_ref().map(|s| s.handle()),
@@ -352,7 +352,7 @@ fn decode_loop(
     shutdown: Arc<AtomicBool>,
 ) {
     let rate = *config.sample_rate_hz;
-    let set = registry::ImplSet::preset(&config.impl_set).expect("validated at startup");
+    let set = config.impls();
     let mut pipeline = registry::build(&set, rate).expect("validated at startup");
 
     let mut tracker = Tracker::new(TrackerConfig {

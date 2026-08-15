@@ -162,18 +162,17 @@ fn check_build(report: &mut Report, config: &Config) {
     );
 
     // Print the *expanded* implementation set. A preset name alone tells the
-    // operator nothing about what is actually running.
-    match registry::ImplSet::preset(&config.impl_set) {
-        Some(set) => report.add(
+    // operator nothing about what is actually running, and with per-stage
+    // overrides in play the preset name can be actively misleading -- an
+    // `--detect` flag makes `baseline` no longer the baseline.
+    let set = config.impls();
+    match registry::check(&set) {
+        Ok(()) => report.add(
             Level::Pass,
             "build.pipeline",
             format!("{} = {set}", *config.impl_set),
         ),
-        None => report.add(
-            Level::Fail,
-            "build.pipeline",
-            format!("unknown impl set '{}'", *config.impl_set),
-        ),
+        Err(e) => report.add(Level::Fail, "build.pipeline", e.to_string()),
     }
 }
 
@@ -321,9 +320,7 @@ fn check_filesystem(report: &mut Report, config: &Config) {
 
 /// Prove the decode chain works with no antenna attached.
 fn check_self_test(report: &mut Report, config: &Config) {
-    let Some(set) = registry::ImplSet::preset(&config.impl_set) else {
-        return;
-    };
+    let set = config.impls();
     let rate = *config.sample_rate_hz;
 
     let messages = synth::canonical_messages();
@@ -530,9 +527,7 @@ fn check_source(report: &mut Report, config: &Config, seconds: u64) {
     }
 
     // Now decode what we captured.
-    let Some(set) = registry::ImplSet::preset(&config.impl_set) else {
-        return;
-    };
+    let set = config.impls();
     let Ok(mut pipeline) = registry::build(&set, rate) else {
         return;
     };

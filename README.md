@@ -61,11 +61,37 @@ endpoint that says `ok` while the decoder has been dead for hours.
 | crate | what it holds | tests |
 |---|---|---|
 | `adsb-core` | Bits, CRC-24, frame validation, field decode, CPR (encode *and* decode) | 40 |
-| `adsb-dsp` | The four swappable stages, the pipeline, the synthetic generator | 45 |
-| `adsb-source` | `file:` / `tcp:` / `usb:`, plus a fault-injecting decorator | 30 |
+| `adsb-dsp` | The four swappable stages, the pipeline, the synthetic generator | 47 |
+| `adsb-source` | `file:` / `tcp:` / `usb:`, plus a fault-injecting decorator | 31 |
 | `adsb-track` | Aircraft state, CPR pairing, plausibility gates, snapshots | 27 |
 | `adsb-store` | Batched SQLite with retention and backpressure | 17 |
-| `adsb-server` | CLI, config, doctor, bench, HTTP API | 21 |
+| `adsb-server` | CLI, config, doctor, bench, HTTP API | 33 |
+
+## Swapping an implementation
+
+Each DSP stage is chosen by name at runtime, so a new implementation lands
+beside the old one and the two can be compared without a rebuild:
+
+```bash
+skyward list-impls                                     # what is registered
+skyward bench --detect correlator-v2 --compare runs/baseline.json
+skyward bench --detect correlator-v3 --slice integrating fixtures/raw/porch.cu8
+```
+
+`--impl-set` names a preset; `--mag`, `--detect`, `--slice` and `--validate`
+override individual stages on top of it. The comparison you usually want by
+week three is against *your own previous attempt*, and that should not require
+defining a preset for every experiment.
+
+An unknown name is a hard startup error listing the alternatives, never a
+silent fallback — "it ran but quietly used something else" is the failure that
+wastes an evening on a box you cannot debug interactively. And because a
+per-stage override makes the preset name misleading (`baseline` is no longer
+the baseline), `doctor` and the run record both print the full expansion:
+
+```
+[ok  ] build.pipeline   baseline = mag=naive detect=correlator-v2 slice=naive validate=crc-only
+```
 
 ## The scoreboard
 
@@ -94,13 +120,14 @@ that finds more but cannot keep up on a Pi.
 
 ## Fixtures
 
-Captures live in `fixtures/raw/`. The `.cu8` files are gitignored — 1.3 GB of
+Captures live in `fixtures/raw/`. The `.cu8` files are gitignored — 2.2 GB of
 IQ does not belong in git — but every capture has a **committed `.toml`
 sidecar** recording sample rate, gain, antenna, position and time. An
 unlabelled IQ file with an assumed sample rate is a silent multi-evening bug.
 
 | fixture | length | baseline | headroom |
 |---|---|---|---|
+| `porch.cu8` | 180 s, 15 aircraft | 1,350 messages | outdoors; 2,151 candidates, the real target |
 | `golden.cu8` | 180 s, 7 aircraft | 517 messages | 2,403 with a better detector |
 | `desk.cu8` | 120 s, 3 aircraft | 167 messages | the hard tier — weak, obstructed |
 

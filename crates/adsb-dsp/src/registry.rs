@@ -146,6 +146,27 @@ pub fn validator(name: &str) -> Result<Box<dyn FrameValidator>, RegistryError> {
     }
 }
 
+/// Check every name in a selection without constructing anything.
+///
+/// Startup validation needs to reject a typo before the radio is touched, and
+/// `build` is the wrong tool for that: it wants a sample rate it has no reason
+/// to know yet, and constructing a detector to find out whether its name is
+/// spelled correctly is a strange way to ask.
+pub fn check(set: &ImplSet) -> Result<(), RegistryError> {
+    fn one(stage: &'static str, name: &str, table: &[(&str, &str)]) -> Result<(), RegistryError> {
+        if table.iter().any(|(n, _)| *n == name) {
+            Ok(())
+        } else {
+            Err(unknown(stage, name, table))
+        }
+    }
+    one("magnitude", &set.magnitude, MAGNITUDE_NAMES)?;
+    one("detector", &set.detector, DETECTOR_NAMES)?;
+    one("slicer", &set.slicer, SLICER_NAMES)?;
+    one("validator", &set.validator, VALIDATOR_NAMES)?;
+    Ok(())
+}
+
 /// Build a pipeline from a named selection.
 pub fn build(set: &ImplSet, sample_rate: u32) -> Result<Pipeline, RegistryError> {
     Ok(Pipeline::new(
@@ -224,6 +245,45 @@ mod tests {
         }
         for (name, _) in VALIDATOR_NAMES {
             assert!(validator(name).is_ok(), "validator '{name}' not wired up");
+        }
+    }
+
+    #[test]
+    fn check_accepts_every_registered_name_and_rejects_typos() {
+        assert!(check(&ImplSet::baseline()).is_ok());
+
+        let wrong = ImplSet {
+            detector: "corelator".into(),
+            ..ImplSet::baseline()
+        };
+        let msg = check(&wrong).expect_err("a typo must not pass").to_string();
+        assert!(msg.contains("corelator"), "should echo the typo: {msg}");
+        assert!(msg.contains("naive"), "should list alternatives: {msg}");
+        assert!(msg.contains("detector"), "should name the stage: {msg}");
+    }
+
+    /// `check` and `build` must agree, or startup validation would pass a
+    /// selection the pipeline then refuses to construct.
+    #[test]
+    fn check_agrees_with_build() {
+        for (m, _) in MAGNITUDE_NAMES {
+            for (d, _) in DETECTOR_NAMES {
+                for (s, _) in SLICER_NAMES {
+                    for (v, _) in VALIDATOR_NAMES {
+                        let set = ImplSet {
+                            magnitude: (*m).into(),
+                            detector: (*d).into(),
+                            slicer: (*s).into(),
+                            validator: (*v).into(),
+                        };
+                        assert_eq!(
+                            check(&set).is_ok(),
+                            build(&set, 2_400_000).is_ok(),
+                            "check and build disagree about {set}"
+                        );
+                    }
+                }
+            }
         }
     }
 
