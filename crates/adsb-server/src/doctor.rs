@@ -187,6 +187,18 @@ fn check_config(report: &mut Report, config: &Config) {
         ),
     }
 
+    // A `.env` only applies when you run from the directory above it, so say
+    // which one was found rather than leaving the operator to guess why a
+    // value they set is missing.
+    match &config.env_file {
+        Some(path) => report.add(Level::Pass, "config.env_file", path.clone()),
+        None => report.add(
+            Level::Pass,
+            "config.env_file",
+            "none found; environment variables must be set by the caller",
+        ),
+    }
+
     // Provenance for every value: this is how an operator confirms an edit
     // actually took effect.
     for line in config.print_resolved().lines() {

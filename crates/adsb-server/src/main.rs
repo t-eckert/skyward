@@ -85,6 +85,10 @@ enum Command {
 }
 
 fn main() -> std::process::ExitCode {
+    // Before anything else, and specifically before any thread exists: this
+    // mutates the process environment, which is not thread-safe on Unix.
+    config::load_dotenv();
+
     let cli = Cli::parse();
 
     let overrides = CliOverrides {
@@ -127,6 +131,9 @@ fn main() -> std::process::ExitCode {
                 println!("  (file: {path})");
             } else {
                 println!("  (no config file; defaults, environment and flags only)");
+            }
+            if let Some(path) = &config.env_file {
+                println!("  (.env: {path})");
             }
             println!();
             print!("{}", config.print_resolved());

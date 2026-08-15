@@ -25,14 +25,23 @@
 //! start.
 
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// Which layer a value came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
     Default,
     File(String),
+    /// A `SKYWARD_*` variable that a `.env` file supplied.
+    ///
+    /// Distinguished from [`Origin::Env`] because the two fail differently: a
+    /// real environment variable is set by whoever launched the process, while
+    /// a `.env` value silently disappears the moment you run from another
+    /// directory. Reporting both as `$NAME` would hide that.
+    DotEnv(&'static str),
     Env(&'static str),
     Cli,
 }
@@ -42,9 +51,88 @@ impl fmt::Display for Origin {
         match self {
             Origin::Default => write!(f, "default"),
             Origin::File(path) => write!(f, "{path}"),
+            Origin::DotEnv(name) => write!(f, "${name} (.env)"),
             Origin::Env(name) => write!(f, "${name}"),
             Origin::Cli => write!(f, "command line"),
         }
+    }
+}
+
+/// What a `.env` file contributed to this process's environment.
+#[derive(Debug, Default)]
+pub struct DotEnv {
+    /// The file that was loaded, if one was found.
+    pub path: Option<String>,
+    /// Keys the file actually supplied — that is, those the real environment
+    /// had not already set.
+    pub keys: HashSet<String>,
+}
+
+static DOTENV: OnceLock<DotEnv> = OnceLock::new();
+
+/// Decide which of a `.env` file's keys will actually reach the process.
+///
+/// Split out from the loading so the precedence rule is testable without
+/// mutating the environment of a running test binary.
+fn keys_supplied_by_file(
+    entries: impl Iterator<Item = (String, String)>,
+    already_set: impl Fn(&str) -> bool,
+) -> HashSet<String> {
+    entries
+        .map(|(key, _)| key)
+        .filter(|key| !already_set(key))
+        .collect()
+}
+
+/// Load `.env` into the environment, and remember what it contributed.
+///
+/// # Why this exists
+///
+/// `.env.example` tells you to `cp .env.example .env` and set your receiver
+/// position. Without this, nothing read that file: the server started with no
+/// position, refused the range gate, and the only clue was a config dump
+/// saying `default` next to a value you had definitely written down.
+///
+/// A real environment variable always wins over the file, so systemd's
+/// `Environment=` on the Pi is never quietly overridden by a stale `.env`
+/// left in the working directory.
+///
+/// # Must be called before any thread starts
+///
+/// This mutates the process environment, which is not thread-safe on Unix.
+/// `main` calls it as its first statement, before the tokio runtime exists.
+pub fn load_dotenv() -> &'static DotEnv {
+    DOTENV.get_or_init(|| {
+        // Read the file first to see which keys the real environment has not
+        // already claimed, *then* apply it. `dotenvy::dotenv` does not
+        // override existing variables, so the two agree.
+        let keys = match dotenvy::dotenv_iter() {
+            Ok(iter) => keys_supplied_by_file(iter.flatten(), |key| {
+                std::env::var_os(key).is_some()
+            }),
+            Err(_) => HashSet::new(),
+        };
+
+        let path = dotenvy::dotenv()
+            .ok()
+            .map(|p| p.display().to_string());
+
+        DotEnv { path, keys }
+    })
+}
+
+/// The `.env` contribution, or an empty record if loading never ran.
+fn dotenv() -> &'static DotEnv {
+    DOTENV.get_or_init(DotEnv::default)
+}
+
+/// Attribute an environment variable to the `.env` file or to the real
+/// environment, so the config dump can tell them apart.
+fn env_origin(name: &'static str) -> Origin {
+    if dotenv().keys.contains(name) {
+        Origin::DotEnv(name)
+    } else {
+        Origin::Env(name)
     }
 }
 
@@ -147,6 +235,8 @@ pub struct Config {
     pub receiver_alt_m: Sourced<f64>,
     /// Where the file layer came from, if any.
     pub config_path: Option<String>,
+    /// The `.env` file that contributed to the environment layer, if any.
+    pub env_file: Option<String>,
 }
 
 fn env_string(name: &'static str) -> Option<String> {
@@ -192,14 +282,14 @@ impl Config {
         let config = Config {
             source: Sourced::new("tcp:127.0.0.1:1234".to_string(), Origin::Default)
                 .or_layer(file.source, file_origin.clone())
-                .or_layer(env_string("SKYWARD_SOURCE"), Origin::Env("SKYWARD_SOURCE"))
+                .or_layer(env_string("SKYWARD_SOURCE"), env_origin("SKYWARD_SOURCE"))
                 .or_layer(cli.source.clone(), Origin::Cli),
 
             sample_rate_hz: Sourced::new(2_400_000u32, Origin::Default)
                 .or_layer(file.sample_rate_hz, file_origin.clone())
                 .or_layer(
                     env_parsed("SKYWARD_SAMPLE_RATE_HZ"),
-                    Origin::Env("SKYWARD_SAMPLE_RATE_HZ"),
+                    env_origin("SKYWARD_SAMPLE_RATE_HZ"),
                 )
                 .or_layer(cli.sample_rate_hz, Origin::Cli),
 
@@ -210,20 +300,20 @@ impl Config {
                 .or_layer(file.gain_db, file_origin.clone())
                 .or_layer(
                     env_string("SKYWARD_GAIN_DB"),
-                    Origin::Env("SKYWARD_GAIN_DB"),
+                    env_origin("SKYWARD_GAIN_DB"),
                 )
                 .or_layer(cli.gain_db.clone(), Origin::Cli),
 
             bind: Sourced::new("0.0.0.0:8080".to_string(), Origin::Default)
                 .or_layer(file.bind, file_origin.clone())
-                .or_layer(env_string("SKYWARD_BIND"), Origin::Env("SKYWARD_BIND"))
+                .or_layer(env_string("SKYWARD_BIND"), env_origin("SKYWARD_BIND"))
                 .or_layer(cli.bind.clone(), Origin::Cli),
 
             db_path: Sourced::new("skyward.db".to_string(), Origin::Default)
                 .or_layer(file.db_path, file_origin.clone())
                 .or_layer(
                     env_string("SKYWARD_DB_PATH"),
-                    Origin::Env("SKYWARD_DB_PATH"),
+                    env_origin("SKYWARD_DB_PATH"),
                 )
                 .or_layer(cli.db_path.clone(), Origin::Cli),
 
@@ -232,14 +322,14 @@ impl Config {
                 .or_layer(
                     env_string("SKYWARD_CORS_ORIGINS")
                         .map(|s| s.split(',').map(|p| p.trim().to_string()).collect()),
-                    Origin::Env("SKYWARD_CORS_ORIGINS"),
+                    env_origin("SKYWARD_CORS_ORIGINS"),
                 ),
 
             log_format: Sourced::new("text".to_string(), Origin::Default)
                 .or_layer(file.log_format, file_origin.clone())
                 .or_layer(
                     env_string("SKYWARD_LOG_FORMAT"),
-                    Origin::Env("SKYWARD_LOG_FORMAT"),
+                    env_origin("SKYWARD_LOG_FORMAT"),
                 )
                 .or_layer(cli.log_format.clone(), Origin::Cli),
 
@@ -247,7 +337,7 @@ impl Config {
                 .or_layer(file.impl_set, file_origin.clone())
                 .or_layer(
                     env_string("SKYWARD_IMPL_SET"),
-                    Origin::Env("SKYWARD_IMPL_SET"),
+                    env_origin("SKYWARD_IMPL_SET"),
                 )
                 .or_layer(cli.impl_set.clone(), Origin::Cli),
 
@@ -255,24 +345,25 @@ impl Config {
                 .or_layer(file.receiver.lat.map(Some), file_origin.clone())
                 .or_layer(
                     env_parsed::<f64>("SKYWARD_RECEIVER_LAT").map(Some),
-                    Origin::Env("SKYWARD_RECEIVER_LAT"),
+                    env_origin("SKYWARD_RECEIVER_LAT"),
                 ),
 
             receiver_lon: Sourced::new(None, Origin::Default)
                 .or_layer(file.receiver.lon.map(Some), file_origin.clone())
                 .or_layer(
                     env_parsed::<f64>("SKYWARD_RECEIVER_LON").map(Some),
-                    Origin::Env("SKYWARD_RECEIVER_LON"),
+                    env_origin("SKYWARD_RECEIVER_LON"),
                 ),
 
             receiver_alt_m: Sourced::new(0.0, Origin::Default)
                 .or_layer(file.receiver.altitude_m, file_origin.clone())
                 .or_layer(
                     env_parsed("SKYWARD_RECEIVER_ALT_M"),
-                    Origin::Env("SKYWARD_RECEIVER_ALT_M"),
+                    env_origin("SKYWARD_RECEIVER_ALT_M"),
                 ),
 
             config_path: path.map(str::to_string),
+            env_file: dotenv().path.clone(),
         };
 
         config.validate()?;
@@ -426,6 +517,34 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    /// A real environment variable beats the file, so a stale `.env` in the
+    /// working directory cannot quietly override systemd's `Environment=`.
+    #[test]
+    fn the_real_environment_wins_over_the_dotenv_file() {
+        let entries = vec![
+            ("SKYWARD_GAIN_DB".to_string(), "44.5".to_string()),
+            ("SKYWARD_BIND".to_string(), "0.0.0.0:9999".to_string()),
+        ];
+        let supplied = keys_supplied_by_file(entries.into_iter(), |key| key == "SKYWARD_GAIN_DB");
+
+        assert!(
+            !supplied.contains("SKYWARD_GAIN_DB"),
+            "already set in the real environment, so the file does not supply it"
+        );
+        assert!(supplied.contains("SKYWARD_BIND"));
+    }
+
+    #[test]
+    fn a_dotenv_value_is_not_reported_as_a_plain_environment_variable() {
+        // The distinction is the point: `$NAME` came from the caller, and
+        // `$NAME (.env)` disappears if you run from another directory.
+        assert_eq!(Origin::Env("SKYWARD_BIND").to_string(), "$SKYWARD_BIND");
+        assert_eq!(
+            Origin::DotEnv("SKYWARD_BIND").to_string(),
+            "$SKYWARD_BIND (.env)"
+        );
     }
 
     #[test]
