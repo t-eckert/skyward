@@ -1,0 +1,236 @@
+/* The Latin subset only, declared directly rather than importing the whole
+   family. `@fontsource-variable/inter` ships seven subsets — Cyrillic, Greek,
+   Vietnamese and the rest — which is 224 kB of fonts for an interface whose
+   entire vocabulary is callsigns, digits and a dozen English words. This
+   range covers all of it, including the U+2212 minus the figures rely on. */
+@font-face {
+	font-family: 'Inter Variable';
+	font-style: normal;
+	font-display: swap;
+	font-weight: 100 900;
+	src: url('@fontsource-variable/inter/files/inter-latin-wght-normal.woff2')
+		format('woff2-variations');
+	unicode-range:
+		U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+		U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Inter throughout, including the telemetry.
+ *
+ * The columns still line up because the figures are set `tabular-nums`, which
+ * is what actually kept them aligned before -- a monospace family was one way
+ * to get that, not the only one. Inter also has a slashed zero (`zero`), which
+ * is worth switching on for an instrument: `0` and `O` sit next to each other
+ * constantly in ICAO addresses like A0A41F.
+ *
+ * Bundled rather than fetched from a CDN: this runs on a home network against
+ * a Pi, and a client that needs the public internet to render its own labels
+ * fails exactly when you are debugging the radio. */
+
+/* ---------------------------------------------------------------- tokens --
+
+   Two directions, both descended from aviation practice, and they double as a
+   light/dark pair:
+
+   FLIGHT DECK (the base) follows the cockpit colour convention literally --
+   white is current status, cyan is background and reference, magenta is the
+   target, amber is caution, green is normal. Instrument type is sized to be
+   read at arm's length, so numerals are large against very small labels.
+
+   CHART is the VFR sectional this screen replaces, on a neutral paper ground.
+   A sectional spends exactly two signal colours, so magenta carries the
+   aircraft -- on a chart, magenta is what you are looking *for* -- and blue
+   stays structural. Printed at 1:500,000 and read in a cockpit, which is a
+   licence to set type small and pack it tight.
+
+   Everything a theme might move lives here, type scale and density included. A
+   theme that can only change hue cannot change how a screen feels. */
+
+:root,
+:root[data-theme='flightdeck'] {
+	--color-bg: #05080b;
+	--color-surface: #0c1218;
+	--color-panel: #0a1015;
+	--color-ink: #ffffff;
+	--color-muted: #7d93a6;
+	--color-line: #1e2c38;
+	--color-line-soft: #151f28;
+
+	--color-accent: #ff4fd8;
+	--color-accent-soft: #2a0d24;
+	--color-alert: #ffb000;
+	--color-ok: #00e07a;
+
+	--color-live: #ffffff;
+	--color-selected: #ff4fd8;
+	--color-stale: #ffb000;
+	--color-ring: #2d7fa3;
+	--color-cross: #0f2f3d;
+	--color-station: #3ddbff;
+	--plot-glow: none;
+
+	--font-sans: 'Inter Variable', Inter, system-ui, sans-serif;
+	--font-display: var(--font-sans);
+
+	--size-wordmark: 16px;
+	--tracking-wordmark: 0.18em;
+	--weight-wordmark: 700;
+	--size-meta: 13px;
+	--size-label: 10px;
+	--tracking-label: 0.16em;
+	--weight-label: 600;
+	--size-hero: 52px;
+	--weight-hero: 500;
+	--size-title: 46px;
+	--leading-title: 50px;
+	--weight-title: 700;
+	--size-value: 24px;
+	--size-unit: 10px;
+	--size-row-call: 16px;
+	--size-row-figure: 16px;
+	--size-row-sub: 10px;
+	--size-tile: 16px;
+	--size-plot-call: 13px;
+	--size-plot-sub: 11px;
+	--tracking-call: 0.02em;
+
+	--header-h: 60px;
+	--footer-h: 92px;
+	--row-h: 60px;
+	--panel-pad: 28px;
+	--sidebar-w: 420px;
+	--list-head-h: 44px;
+
+	--radius-sm: 2px;
+	--radius-md: 2px;
+	--border-w: 1px;
+	--select-bar-w: 4px;
+	--glyph-size: 16px;
+
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 20px;
+	--space-5: 32px;
+}
+
+/* The paper is a neutral warm gray rather than sectional buff: the chart's
+   own ground is a printing constraint, and carrying it over tints every
+   value on the screen. Keeping the two signal colours and dropping the tint
+   leaves the logic and loses the costume. */
+:root[data-theme='chart'] {
+	--color-bg: #f0efeb;
+	--color-surface: #fbfaf8;
+	--color-panel: #fbfaf8;
+	--color-ink: #1f2225;
+	--color-muted: #6e7378;
+	--color-line: #d7d5cf;
+	--color-line-soft: #e8e6e1;
+
+	--color-accent: #9c2f74;
+	--color-accent-soft: #f3e4ee;
+	--color-alert: #b0421f;
+	--color-ok: #3a6188;
+
+	--color-live: #9c2f74;
+	--color-selected: #7a2359;
+	--color-stale: #8a8883;
+	--color-ring: #8ea2b5;
+	--color-cross: #e6e7e8;
+	--color-station: #3a6188;
+	--plot-glow: none;
+
+	--size-wordmark: 15px;
+	--tracking-wordmark: 0.2em;
+	--weight-wordmark: 700;
+	--size-meta: 12px;
+	--size-label: 10px;
+	--tracking-label: 0.14em;
+	--weight-label: 600;
+	--size-hero: 34px;
+	--weight-hero: 600;
+	--size-title: 30px;
+	--leading-title: 34px;
+	--weight-title: 700;
+	--size-value: 17px;
+	--size-unit: 10px;
+	--size-row-call: 13px;
+	--size-row-figure: 13px;
+	--size-row-sub: 10px;
+	--size-tile: 13px;
+	--size-plot-call: 11px;
+	--size-plot-sub: 10px;
+	--tracking-call: 0.01em;
+
+	--header-h: 52px;
+	--footer-h: 72px;
+	--row-h: 44px;
+	--panel-pad: 22px;
+	--sidebar-w: 388px;
+	--list-head-h: 36px;
+
+	--radius-sm: 0px;
+	--radius-md: 0px;
+	--select-bar-w: 3px;
+	--glyph-size: 13px;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	height: 100%;
+}
+
+body {
+	margin: 0;
+	background: var(--color-bg);
+	color: var(--color-ink);
+	font-family: var(--font-sans);
+	font-size: var(--size-meta);
+	font-synthesis: none;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+/* Telemetry. Tabular figures so a column of altitudes does not shift by a
+   pixel as its digits change, and a slashed zero so `A0A41F` is unambiguous. */
+.tnum {
+	font-variant-numeric: tabular-nums slashed-zero;
+	font-feature-settings:
+		'tnum' 1,
+		'zero' 1;
+}
+
+/* The small caps label used above every value in the interface. */
+.label {
+	font-size: var(--size-label);
+	font-weight: var(--weight-label);
+	letter-spacing: var(--tracking-label);
+	line-height: 14px;
+	color: var(--color-muted);
+	text-transform: uppercase;
+}
+
+button {
+	font: inherit;
+	color: inherit;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+}
+
+a {
+	color: inherit;
+	text-decoration: none;
+}
+
+:focus-visible {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 2px;
+}
