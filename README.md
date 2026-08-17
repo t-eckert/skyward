@@ -157,6 +157,13 @@ skyward run --source file:fixtures/raw/golden.cu8 --api-only
 curl localhost:8080/api/v1/aircraft | jq
 ```
 
+## Running on a Raspberry Pi
+
+The headless deployment this was built for — free the dongle from the DVB
+driver, build the single embedded binary, and run `rtl_tcp` and `skyward` under
+systemd — is written up step by step in
+[docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md).
+
 ## The client
 
 A SvelteKit app in `client/`, built against the design in Paper. Aircraft are
