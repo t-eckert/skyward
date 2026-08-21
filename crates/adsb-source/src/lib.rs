@@ -31,10 +31,14 @@ use std::time::Duration;
 pub mod file;
 pub mod misbehaving;
 pub mod tcp;
+#[cfg(feature = "usb")]
+pub mod usb;
 
 pub use file::{FileSource, Pace};
 pub use misbehaving::{Fault, MisbehavingSource};
 pub use tcp::TcpSource;
+#[cfg(feature = "usb")]
+pub use usb::{DeviceInfo, UsbSource};
 
 /// A source of raw IQ samples.
 pub trait IqSource: Send {
@@ -81,6 +85,39 @@ pub trait IqSource: Send {
     }
 
     fn set_bias_tee(&mut self, _enabled: bool) -> Result<(), SourceError> {
+        Ok(())
+    }
+
+    /// Bytes the source itself discarded because the consumer was too slow.
+    ///
+    /// # Why a counter and not a log line
+    ///
+    /// A buffering source hides overruns perfectly. [`crate::usb::UsbSource`]
+    /// keeps a ring the dongle fills asynchronously; when the decoder falls
+    /// behind, the ring drops blocks and `read` keeps returning a full 2.4
+    /// MS/s. The *effective sample rate* — the one number that normally
+    /// separates "dropping samples" from "hearing nothing" — stays perfect
+    /// while a tenth of the sky goes missing. Only the source knows, so only
+    /// the source can say.
+    fn overruns(&self) -> u64 {
+        0
+    }
+
+    /// Re-establish the link after a transient failure, restoring every
+    /// setting that was applied to it.
+    ///
+    /// # Why this is on the trait rather than left to the caller
+    ///
+    /// The decode loop retries transient errors forever, which is right. But
+    /// retrying a `read` on a socket the server already closed, or on a USB
+    /// handle invalidated by a bus reset, fails identically forever: the
+    /// receiver stays up, the log fills with the same warning, and nothing
+    /// ever comes back without a restart. Recovery has to be something the
+    /// loop can *ask for*, and only the source knows what it means.
+    ///
+    /// The default is a no-op success, which is correct for a file: there is
+    /// nothing to re-establish, and the next `read` is as good as this one.
+    fn reconnect(&mut self) -> Result<(), SourceError> {
         Ok(())
     }
 
@@ -249,10 +286,14 @@ pub fn open(spec: &SourceSpec, options: &SourceOptions) -> Result<Box<dyn IqSour
     match spec {
         SourceSpec::File { path } => Ok(Box::new(FileSource::open(path, options)?)),
         SourceSpec::Tcp { host, port } => Ok(Box::new(TcpSource::connect(host, *port, options)?)),
+        #[cfg(feature = "usb")]
+        SourceSpec::Usb { index } => Ok(Box::new(UsbSource::open(*index, options)?)),
+        #[cfg(not(feature = "usb"))]
         SourceSpec::Usb { index } => Err(SourceError::Config(format!(
-            "USB source (index {index}) is not implemented yet. Run rtl_tcp and use \
-             tcp:127.0.0.1:1234 -- that is the recommended deployment anyway, because \
-             rtl_tcp uses libusb async transfers and does not drop samples between reads."
+            "usb:{index} needs a binary built with the `usb` feature, and this one \
+             was not. Either rebuild with `cargo build --release --features usb` \
+             (it needs librtlsdr: `apt install librtlsdr-dev`), or run rtl_tcp and \
+             use tcp:127.0.0.1:1234."
         ))),
     }
 }
@@ -342,15 +383,17 @@ mod tests {
         assert!(SourceError::EndOfStream.is_end_of_stream());
     }
 
+    /// Without the feature, the message must name both ways forward. A bare
+    /// "unsupported" sends someone to read the source of a binary they cannot
+    /// rebuild on the machine they are standing next to.
+    #[cfg(not(feature = "usb"))]
     #[test]
-    fn usb_is_refused_with_a_useful_message() {
+    fn usb_without_the_feature_names_both_ways_out() {
         let err = open(&SourceSpec::Usb { index: 0 }, &SourceOptions::default())
             .err()
-            .expect("usb should not open yet");
+            .expect("usb should not open in a build without the feature");
         let msg = err.to_string();
-        assert!(
-            msg.contains("rtl_tcp"),
-            "should point at the alternative: {msg}"
-        );
+        assert!(msg.contains("--features usb"), "{msg}");
+        assert!(msg.contains("rtl_tcp"), "{msg}");
     }
 }

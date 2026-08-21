@@ -158,23 +158,6 @@ impl TcpSource {
         Ok(())
     }
 
-    /// Re-establish the connection and replay every setting.
-    ///
-    /// Reconnecting without replaying leaves the dongle on its defaults —
-    /// wrong frequency, auto gain — and the receiver goes quiet for reasons
-    /// that are invisible from the message count alone.
-    pub fn reconnect(&mut self) -> Result<(), SourceError> {
-        let stream = Self::dial(&self.address, self.read_timeout)?;
-        self.info = Self::read_header(&stream, &self.address)?;
-        self.stream = stream;
-
-        let settings = std::mem::take(&mut self.applied);
-        for (opcode, value) in settings {
-            self.command(opcode, value)?;
-        }
-        Ok(())
-    }
-
     pub fn set_frequency_correction(&mut self, ppm: i32) -> Result<(), SourceError> {
         self.command(CMD_SET_FREQ_CORRECTION, ppm as u32)
     }
@@ -280,6 +263,23 @@ impl IqSource for TcpSource {
 
     fn set_bias_tee(&mut self, enabled: bool) -> Result<(), SourceError> {
         self.command(CMD_SET_BIAS_TEE, u32::from(enabled))
+    }
+
+    /// Re-dial and replay every setting.
+    ///
+    /// Reconnecting without replaying leaves the dongle on `rtl_tcp`'s
+    /// defaults — wrong frequency, automatic gain — and the receiver goes
+    /// quiet for reasons that are invisible from the message count alone.
+    fn reconnect(&mut self) -> Result<(), SourceError> {
+        let stream = Self::dial(&self.address, self.read_timeout)?;
+        self.info = Self::read_header(&stream, &self.address)?;
+        self.stream = stream;
+
+        let settings = std::mem::take(&mut self.applied);
+        for (opcode, value) in settings {
+            self.command(opcode, value)?;
+        }
+        Ok(())
     }
 }
 
