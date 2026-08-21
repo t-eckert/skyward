@@ -1,0 +1,16 @@
+# Let an unprivileged skyward claim the dongle.
+#
+# Without this, rtlsdr_open fails with a permissions error that librtlsdr
+# reports as a plain negative number, and the obvious reading — "the device is
+# not there" — is wrong. `skyward devices` still lists it, because enumeration
+# reads descriptors without claiming; that difference is the tell.
+#
+#   sudo cp deploy/udev/99-skyward-rtlsdr.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Realtek RTL2832U, in the vendor/product combinations the common sticks use.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0ccd", ATTRS{idProduct}=="00a9", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d19", ATTRS{idProduct}=="1101", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1f4d", ATTRS{idProduct}=="b803", MODE="0660", GROUP="plugdev"

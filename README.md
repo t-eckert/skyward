@@ -12,6 +12,13 @@ cargo run --release -p adsb-server -- bench --compare runs/baseline.json
 cargo run --release -p adsb-server -- run --source file:fixtures/raw/golden.cu8
 ```
 
+**Full documentation is in [docs/](docs/README.md)** — a five-minute [quick
+start](docs/README.md#quick-start), a [Raspberry Pi
+deployment](docs/RASPBERRY_PI.md), a [runbook](docs/OPERATIONS.md), reference
+for [every setting](docs/CONFIGURATION.md), [command](docs/CLI.md) and
+[endpoint](docs/API.md), and a 1600-line [study guide](docs/GUIDE.md) on the
+radio itself.
+
 ## What this is for
 
 This is a learning project. The interesting radio code is meant to be
@@ -62,10 +69,10 @@ endpoint that says `ok` while the decoder has been dead for hours.
 |---|---|---|
 | `adsb-core` | Bits, CRC-24, frame validation, field decode, CPR (encode *and* decode) | 40 |
 | `adsb-dsp` | The four swappable stages, the pipeline, the synthetic generator | 47 |
-| `adsb-source` | `file:` / `tcp:` / `usb:`, plus a fault-injecting decorator | 31 |
-| `adsb-track` | Aircraft state, CPR pairing, plausibility gates, snapshots | 27 |
+| `adsb-source` | `file:` / `tcp:` / `usb:` (librtlsdr, feature-gated), plus a fault-injecting decorator | 30 |
+| `adsb-track` | Aircraft state, CPR pairing, plausibility gates, snapshots | 28 |
 | `adsb-store` | Batched SQLite with retention and backpressure | 17 |
-| `adsb-server` | CLI, config, doctor, bench, HTTP API | 33 |
+| `adsb-server` | CLI, config, doctor, bench, station, HTTP API | 43 |
 
 ## Swapping an implementation
 
@@ -140,6 +147,11 @@ skyward doctor --offline      # proves the decode chain works on this CPU
 skyward bench                 # score the fixtures
 ```
 
+The position is optional — without one the server starts, warns, and runs with
+the range gate and local CPR disabled — and it can be set from the web
+interface while the receiver runs, which is usually easier than editing a file
+on a headless box. See [CONFIGURATION.md](docs/CONFIGURATION.md).
+
 `.env` is loaded from the working directory at startup. A real environment
 variable always wins over it, so systemd's `Environment=` on the Pi is never
 overridden by a stale file — and `skyward config` marks which is which:
@@ -159,10 +171,19 @@ curl localhost:8080/api/v1/aircraft | jq
 
 ## Running on a Raspberry Pi
 
-The headless deployment this was built for — free the dongle from the DVB
-driver, build the single embedded binary, and run `rtl_tcp` and `skyward` under
-systemd — is written up step by step in
-[docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md).
+The headless deployment this was built for. Built with `--features usb`,
+skyward drives the dongle itself, so it is one binary and one systemd unit:
+
+```bash
+cargo build --release --features usb    # needs librtlsdr-dev
+sudo ./deploy/install.sh
+```
+
+`deploy/` holds the unit, the udev rule, and the DVB blacklist as real files
+rather than heredocs in prose. Step by step in
+[docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md); what was checked, what was fixed,
+and what a Pi still has to confirm is in
+[docs/PI_AUDIT.md](docs/PI_AUDIT.md).
 
 ## The client
 
@@ -320,9 +341,11 @@ Half-wave dipole at 1090 MHz is 13.8 cm tip to tip, vertical.
 
 ## Known gaps
 
-- **USB source.** Not implemented. `rtl_tcp` is the recommended deployment —
-  it uses libusb async transfers, so it does not drop samples between reads,
-  and it keeps this binary free of C dependencies.
+- **The USB source has never run against hardware.** `--features usb` binds to
+  librtlsdr and is exercised by tests that call into it, but no dongle was
+  attached when it was written: enumeration is verified, everything from
+  `rtlsdr_open` onward is not. `rtl_tcp` remains fully supported and is the
+  path with hours behind it.
 - **Gillham altitude** (Q=0, above 50,175 ft) reports `Unavailable`.
 - **Local CPR and surface positions** are designed for but not implemented.
 - **`skyward bundle`** is specified in the plan but not built yet.
@@ -337,3 +360,7 @@ Half-wave dipole at 1090 MHz is 13.8 cm tip to tip, vertical.
   away. Correct behaviour, wrong input: the fixture sidecars record
   `[receiver] unset = true`, so there is no capture-time position to use
   instead. The headline metric is unaffected.
+- **No authentication, anywhere.** Everything on the API is readable by anyone
+  who can reach the port, and the station position is writable by them unless
+  `station_writable` is turned off. Fine for a home LAN; put it behind a
+  reverse proxy for anything else.

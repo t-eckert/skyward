@@ -19,6 +19,11 @@
 *.db
 *.db-wal
 *.db-shm
+
+# The runtime station overlay. Written when the position is set through the
+# API, and it holds the same home address .env does.
+/skyward-station.toml
+skyward-station.toml.tmp
 /bundles/
 
 # Diagnostic bundles collected from the Pi may contain a raw IQ sample and

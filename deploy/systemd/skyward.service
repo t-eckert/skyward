@@ -1,0 +1,70 @@
+# skyward — one unit, one process, the dongle driven directly.
+#
+# The USB build talks to the RTL-SDR itself, so there is no rtl_tcp.service to
+# order against and no localhost socket in between. If you are running the
+# default (non-USB) build, install rtl_tcp.service alongside this one and set
+# SKYWARD_SOURCE=tcp:127.0.0.1:1234.
+#
+#   sudo cp deploy/systemd/skyward.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now skyward
+
+[Unit]
+Description=skyward ADS-B receiver
+Documentation=https://github.com/t-eckert/skyward
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=skyward
+Group=plugdev
+
+# `plugdev` plus the udev rule in deploy/udev is what lets an unprivileged
+# process claim the dongle. Running this as root instead would work and is not
+# worth it for a service that listens on a LAN.
+SupplementaryGroups=plugdev
+
+WorkingDirectory=/var/lib/skyward
+ExecStart=/usr/local/bin/skyward run
+
+# Configuration lives here rather than in a .env beside the binary. A .env is
+# resolved relative to the working directory, so it silently stops applying the
+# moment anything runs from somewhere else — a footgun that costs an evening on
+# a machine you are not logged into. An explicit EnvironmentFile cannot do that.
+EnvironmentFile=/etc/skyward.env
+
+# Restart always, including on a clean exit. skyward is not supposed to exit;
+# if it does, something is wrong and the right response is to come back and
+# say so in the log, not to stay down until someone notices.
+Restart=always
+RestartSec=5s
+# Do not give up after the default five attempts. A Pi that boots before its
+# USB bus settles, or before NTP, would otherwise be permanently down after a
+# power cut — the exact scenario this is deployed into.
+StartLimitIntervalSec=0
+
+# journald captures stdout; `journalctl -u skyward -f` is the whole runbook.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skyward
+
+# Modest hardening. Not a sandbox — the process needs raw USB and a writable
+# state directory — but there is no reason for it to see /home or write /usr.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/skyward
+
+# The decoder is a tight loop that must not be starved by a background apt run.
+# Nice, not real-time: an RT priority on a single-core Pi risks locking out the
+# very shell you would need to fix it.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+# Only needed for a binary built WITHOUT the `usb` feature.
+#
+# With `cargo build --release --features usb` skyward drives the dongle itself
+# and this unit should not be installed at all — two processes competing for
+# one USB device is a guaranteed "usb_claim_interface error -6".
+#
+# No -f or -s flags: skyward speaks the rtl_tcp control protocol and sets the
+# frequency, sample rate and gain itself over the socket.
+
+[Unit]
+Description=rtl_tcp IQ server for skyward
+After=network-online.target
+Before=skyward.service
+
+[Service]
+Type=exec
+User=skyward
+SupplementaryGroups=plugdev
+# Localhost only. skyward is the sole client, and an open IQ server on a LAN is
+# an unauthenticated radio anyone can retune.
+ExecStart=/usr/bin/rtl_tcp -a 127.0.0.1 -p 1234
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=0
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rtl_tcp
+
+[Install]
+WantedBy=multi-user.target
