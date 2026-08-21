@@ -27,6 +27,7 @@
 
 use crate::api;
 use crate::config::Config;
+use crate::station::{Station, StationState};
 use adsb_dsp::registry;
 use adsb_source::{IqSource, SourceOptions, SourceSpec};
 use adsb_store::{MovementFilter, Record, Store, StoreConfig, StoreHandle};
@@ -69,8 +70,8 @@ pub fn now_ms() -> i64 {
 pub struct AppState {
     pub snapshot: Arc<ArcSwap<Snapshot>>,
     pub started: Instant,
-    pub receiver: Option<(f64, f64)>,
-    pub receiver_alt_m: f64,
+    /// The station position, which the API may change while this runs.
+    pub station: Arc<StationState>,
     pub station_name: String,
     pub db_path: String,
     pub sample_rate_hz: u32,
@@ -97,6 +98,12 @@ pub struct Counters {
     /// This is the number that separates "dropping samples" from "hearing
     /// nothing", which are indistinguishable in the message count alone.
     pub effective_rate_milli: AtomicU64,
+    /// Bytes the source discarded before we ever saw them.
+    ///
+    /// A buffering source (the USB ring) keeps `read` returning a full rate
+    /// while quietly throwing samples away, so the effective rate above stays
+    /// perfect through a real loss. This is the only number that shows it.
+    pub source_overrun_bytes: AtomicU64,
     pub streaming: AtomicBool,
 }
 
@@ -132,6 +139,15 @@ impl AppState {
         if store.errors > 0 {
             warnings.push(format!("{} database write errors", store.errors));
         }
+        let overrun = self.counters.source_overrun_bytes.load(Ordering::Relaxed);
+        if overrun > 0 {
+            warnings.push(format!(
+                "{:.1} MB of samples were dropped before decoding: the decoder is not \
+                 keeping up with the radio. This looks exactly like poor reception in \
+                 the message count and is a software problem",
+                overrun as f64 / 1e6
+            ));
+        }
 
         // Freshness, not liveness. "The process is up" is not health.
         let status = if !streaming || sample_age_ms > 30_000 {
@@ -152,6 +168,7 @@ impl AppState {
                 "reconnects": self.counters.reconnects.load(Ordering::Relaxed),
                 "effective_sample_rate_hz":
                     self.counters.effective_rate_milli.load(Ordering::Relaxed) as f64 / 1000.0,
+                "overrun_bytes": overrun,
                 "last_sample_age_ms": if sample_age_ms == i64::MAX { None } else { Some(sample_age_ms) },
             },
             "decode": {
@@ -184,6 +201,7 @@ impl AppState {
             "reconnects": c.reconnects.load(Ordering::Relaxed),
             "effective_sample_rate_hz":
                 c.effective_rate_milli.load(Ordering::Relaxed) as f64 / 1000.0,
+            "source_overrun_bytes": c.source_overrun_bytes.load(Ordering::Relaxed),
             "configured_sample_rate_hz": self.sample_rate_hz,
             "impl_set": self.impl_set,
             "store": self.store.as_ref().map(|s| {
@@ -256,6 +274,10 @@ pub fn run(config: Config, args: RunArgs) -> ExitCode {
     } else {
         match Store::open(StoreConfig {
             path: config.db_path.value.clone(),
+            retention: match *config.retention_hours {
+                0 => None,
+                hours => Some(Duration::from_secs(u64::from(hours) * 3600)),
+            },
             ..Default::default()
         }) {
             Ok(s) => {
@@ -269,13 +291,38 @@ pub fn run(config: Config, args: RunArgs) -> ExitCode {
         }
     };
 
+    // The station position is resolved here rather than read straight off
+    // `config`, because the API can change it while the decoder runs.
+    let (station, station_warning) = StationState::load(
+        config.receiver().map(|(lat, lon)| Station {
+            lat,
+            lon,
+            altitude_m: *config.receiver_alt_m,
+        }),
+        config.receiver_origin(),
+        Some(std::path::PathBuf::from(config.station_file.value.clone())),
+        *config.station_writable,
+    );
+    if let Some(warning) = station_warning {
+        tracing::warn!("{warning}");
+    }
+    if station.overlay_shadows_config() {
+        // The "my edit did nothing" case, said out loud at startup rather
+        // than discovered three restarts later.
+        tracing::warn!(
+            overlay = %config.station_file.value,
+            "the station position set at runtime is overriding the one in {}. \
+             Send DELETE /api/v1/receiver, or delete that file, to go back to it",
+            station.configured_origin()
+        );
+    }
+
     let snapshot = Arc::new(ArcSwap::from_pointee(Snapshot::empty(Tick::now())));
     let counters = Arc::new(Counters::default());
     let state = Arc::new(AppState {
         snapshot: Arc::clone(&snapshot),
         started: Instant::now(),
-        receiver: config.receiver(),
-        receiver_alt_m: *config.receiver_alt_m,
+        station: Arc::clone(&station),
         station_name: "skyward".to_string(),
         db_path: config.db_path.value.clone(),
         sample_rate_hz: *config.sample_rate_hz,
@@ -286,10 +333,11 @@ pub fn run(config: Config, args: RunArgs) -> ExitCode {
         store: store.as_ref().map(|s| s.handle()),
     });
 
-    if config.receiver().is_none() {
+    if station.get().is_none() {
         tracing::warn!(
             "receiver position unset: the range gate and local CPR are disabled. \
-             Set SKYWARD_RECEIVER_LAT / SKYWARD_RECEIVER_LON"
+             Set SKYWARD_RECEIVER_LAT / SKYWARD_RECEIVER_LON, or set it from the \
+             web interface -- it now takes effect without a restart"
         );
     }
 
@@ -302,9 +350,14 @@ pub fn run(config: Config, args: RunArgs) -> ExitCode {
         let counters = Arc::clone(&counters);
         let shutdown = Arc::clone(&shutdown);
         let handle = store.as_ref().map(|s| s.handle());
+        let station = Arc::clone(&station);
         std::thread::Builder::new()
             .name("skyward-decode".into())
-            .spawn(move || decode_loop(config, source, snapshot, counters, handle, shutdown))
+            .spawn(move || {
+                decode_loop(
+                    config, source, snapshot, counters, handle, station, shutdown,
+                )
+            })
             .expect("spawning the decoder thread")
     };
 
@@ -349,6 +402,7 @@ fn decode_loop(
     snapshot: Arc<ArcSwap<Snapshot>>,
     counters: Arc<Counters>,
     store: Option<StoreHandle>,
+    station: Arc<StationState>,
     shutdown: Arc<AtomicBool>,
 ) {
     let rate = *config.sample_rate_hz;
@@ -357,11 +411,16 @@ fn decode_loop(
 
     let mut tracker = Tracker::new(TrackerConfig {
         gates: adsb_track::Gates {
-            receiver: config.receiver(),
+            receiver: station.coords(),
             ..Default::default()
         },
         ..Default::default()
     });
+    // The generation the tracker's gates were built from. Comparing it once
+    // per publish tick is one relaxed atomic load; re-reading the position
+    // itself every time would work too, but this keeps the no-change path --
+    // which is every tick but a handful in a receiver's lifetime -- free.
+    let mut station_generation = station.generation();
 
     let movement = MovementFilter::default();
     let mut last_written: HashMap<String, (f64, f64, Option<i32>, i64)> = HashMap::new();
@@ -395,6 +454,18 @@ fn decode_loop(
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(), "source error, retrying");
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(Duration::from_secs(30));
+
+                // Retrying the *read* is not enough, and quietly was not:
+                // once rtl_tcp closes the socket or a USB reset invalidates
+                // the handle, every subsequent read fails identically for as
+                // long as the process lives. The receiver stays "up", the log
+                // repeats one line, and nothing comes back without a restart.
+                // Asking the source to re-establish itself is what makes the
+                // retry loop actually a recovery loop.
+                if let Err(e) = source.reconnect() {
+                    tracing::warn!(error = %e, "reconnect failed; will retry");
+                    continue;
+                }
                 counters.streaming.store(true, Ordering::Relaxed);
                 continue;
             }
@@ -457,6 +528,10 @@ fn decode_loop(
             }
         }
 
+        counters
+            .source_overrun_bytes
+            .store(source.overruns(), Ordering::Relaxed);
+
         let stats = pipeline.stats();
         counters
             .candidates
@@ -466,6 +541,24 @@ fn decode_loop(
 
         // Publish a snapshot at a human rate, not a sample rate.
         if last_publish.elapsed() >= Duration::from_millis(500) {
+            let generation = station.generation();
+            if generation != station_generation {
+                station_generation = generation;
+                let coords = station.coords();
+                if tracker.set_receiver(coords) {
+                    match coords {
+                        Some((lat, lon)) => tracing::info!(
+                            lat,
+                            lon,
+                            "receiver position changed; the range gate follows it from here"
+                        ),
+                        None => tracing::warn!(
+                            "receiver position cleared; the range gate is now disabled"
+                        ),
+                    }
+                }
+            }
+
             tracker.expire(tick);
             snapshot.store(Arc::new(tracker.snapshot(tick)));
             last_publish = Instant::now();

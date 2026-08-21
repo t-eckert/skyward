@@ -53,6 +53,8 @@
 	interface Props {
 		aircraft: Aircraft[];
 		receiver: { lat: number | null; lon: number | null };
+		/** Offered in the unset-position notice. Omitted in Storybook. */
+		onsetstation?: () => void;
 		nowMs: number;
 		selected: string | null;
 		/** The view is a frozen snapshot, not live. */
@@ -60,7 +62,18 @@
 		onselect: (icao: string | null) => void;
 	}
 
-	let { aircraft, receiver, nowMs, selected, frozen = false, onselect }: Props = $props();
+	let {
+		aircraft,
+		receiver,
+		nowMs,
+		selected,
+		frozen = false,
+		onselect,
+		onsetstation
+	}: Props = $props();
+
+	/** The station the map has already flown to, so it only does so on a change. */
+	let centredOn = $state<[number, number] | null>(null);
 
 	/** An aircraft heard longer ago than this is drawn as stale. */
 	const STALE_MS = 30_000;
@@ -426,6 +439,24 @@
 		});
 	});
 
+	/**
+	 * Follow the station when it moves.
+	 *
+	 * The position is settable at runtime now, and the first thing someone
+	 * does after setting it is look for their own house. Without this the map
+	 * silently keeps the fallback centre it was constructed with and the
+	 * change appears not to have worked — the rings redraw thousands of
+	 * kilometres off-screen.
+	 */
+	$effect(() => {
+		const lat = receiver.lat;
+		const lon = receiver.lon;
+		if (!map || lat === null || lon === null) return;
+		if (centredOn && centredOn[0] === lat && centredOn[1] === lon) return;
+		centredOn = [lat, lon];
+		map.easeTo({ center: [lon, lat], zoom: 7 });
+	});
+
 	/** Recentre on the station. */
 	export function home() {
 		if (map && receiver.lat !== null && receiver.lon !== null) {
@@ -437,7 +468,14 @@
 <div class="map" class:frozen bind:this={container}></div>
 
 {#if receiver.lat === null || receiver.lon === null}
-	<p class="notice">receiver position unset · set SKYWARD_RECEIVER_LAT and _LON to plot range</p>
+	<p class="notice">
+		receiver position unset · no range rings, no range gate, no local CPR
+		{#if onsetstation}
+			<button onclick={onsetstation}>SET IT</button>
+		{:else}
+			· set SKYWARD_RECEIVER_LAT and _LON
+		{/if}
+	</p>
 {/if}
 
 <style>
@@ -459,8 +497,25 @@
 		transform: translateX(-50%);
 		margin: 0;
 		font-size: 12px;
-		color: var(--color-muted);
+		color: var(--color-alert);
+		/* The paragraph stays transparent to the pointer so it never blocks a
+		   drag across the middle of the map; the button inside opts back in. */
 		pointer-events: none;
+	}
+
+	.notice button {
+		margin-inline-start: var(--space-2);
+		padding: 2px 6px;
+		font-family: inherit;
+		font-size: var(--size-label);
+		font-weight: var(--weight-label);
+		letter-spacing: var(--tracking-label);
+		color: var(--color-alert);
+		background: transparent;
+		border: var(--border-w) solid var(--color-alert);
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		pointer-events: auto;
 	}
 
 	/* MapLibre's own chrome, brought into the token set so it does not read as

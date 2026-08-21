@@ -14,6 +14,14 @@ export const receiver: Receiver = {
 	lat: 41.788,
 	lon: -76.79,
 	altitude_m: 340,
+	origin: '$SKYWARD_RECEIVER_LAT',
+	writable: true,
+	configured: {
+		lat: 41.788,
+		lon: -76.79,
+		altitude_m: 340,
+		origin: '$SKYWARD_RECEIVER_LAT'
+	},
 	station: 'porch',
 	version: '0.1.0',
 	uptime_s: 62_460,
@@ -22,6 +30,28 @@ export const receiver: Receiver = {
 	impl_set: 'baseline',
 	source: 'tcp:127.0.0.1:1234 (R820T tuner, 29 gain steps)'
 };
+
+/** A receiver that has never been told where it is. */
+export const receiverUnset: Receiver = {
+	...receiver,
+	lat: null,
+	lon: null,
+	altitude_m: 0,
+	origin: 'unset',
+	configured: null
+};
+
+/** A position set from this interface, shadowing what configuration asks for. */
+export const receiverRuntime: Receiver = {
+	...receiver,
+	lat: 45.421,
+	lon: -75.697,
+	altitude_m: 70,
+	origin: 'set at runtime'
+};
+
+/** A receiver started with `station_writable = false`. */
+export const receiverLocked: Receiver = { ...receiver, writable: false };
 
 export const aircraft: Aircraft[] = [
 	{

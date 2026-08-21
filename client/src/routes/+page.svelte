@@ -9,8 +9,11 @@
 	import DisconnectedBanner from '$lib/components/DisconnectedBanner.svelte';
 	import NoTraffic from "$lib/components/NoTraffic.svelte";
 	import SourceDownBanner from "$lib/components/SourceDownBanner.svelte";
+	import StationDialog from "$lib/components/StationDialog.svelte";
 
 	const live = new Live();
+
+	let editingStation = $state(false);
 
 	onMount(() => {
 		live.start();
@@ -37,7 +40,17 @@
 	connection={live.connection}
 	lastSnapshotMs={live.lastSnapshotMs}
 	status={live.viewState}
+	oneditstation={() => (editingStation = true)}
 />
+
+{#if editingStation}
+	<StationDialog
+		receiver={live.receiver}
+		onsave={(position) => live.setStation(position)}
+		onrevert={() => live.clearStation()}
+		onclose={() => (editingStation = false)}
+	/>
+{/if}
 
 {#if live.viewState === "source-down"}
 	<SourceDownBanner
@@ -61,6 +74,7 @@
 		selected={live.selected}
 		{frozen}
 		onselect={(icao) => (live.selected = icao)}
+		onsetstation={() => (editingStation = true)}
 	/>
 
 	<aside>

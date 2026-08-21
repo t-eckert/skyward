@@ -11,6 +11,7 @@ mod bench;
 mod config;
 mod doctor;
 mod run;
+mod station;
 mod web;
 
 use clap::{Parser, Subcommand};
@@ -33,6 +34,7 @@ struct Cli {
     #[arg(long, global = true)]
     source: Option<String>,
 
+    /// Samples per second to ask the radio for. Mode S needs at least 2 MS/s.
     #[arg(long, global = true)]
     sample_rate_hz: Option<u32>,
 
@@ -40,9 +42,11 @@ struct Cli {
     #[arg(long, global = true)]
     gain_db: Option<String>,
 
+    /// SQLite file for recorded history.
     #[arg(long, global = true)]
     db_path: Option<String>,
 
+    /// Address the API and web interface listen on, as HOST:PORT.
     #[arg(long, global = true)]
     bind: Option<String>,
 
@@ -99,6 +103,13 @@ enum Command {
     /// List every registered pipeline implementation.
     ListImpls,
 
+    /// List the RTL-SDR dongles on the USB bus.
+    ///
+    /// Answers the first question of any USB problem — is the dongle even
+    /// visible — without opening it, so it works while rtl_tcp or another
+    /// skyward is holding the device.
+    Devices,
+
     /// Decode Mode S messages given as hex. Useful for poking at a capture.
     Decode {
         /// One or more messages in hex.
@@ -137,6 +148,9 @@ fn main() -> std::process::ExitCode {
         Command::Decode { messages } => {
             return decode_command(messages);
         }
+        Command::Devices => {
+            return devices_command();
+        }
         _ => {}
     }
 
@@ -168,8 +182,65 @@ fn main() -> std::process::ExitCode {
         Command::Doctor(args) => doctor::run(&config, &args),
         Command::Bench(args) => bench::run(&config, &args),
         Command::Run(args) => run::run(config, args),
-        Command::ListImpls | Command::Decode { .. } => unreachable!("handled above"),
+        Command::ListImpls | Command::Decode { .. } | Command::Devices => {
+            unreachable!("handled above")
+        }
     }
+}
+
+/// List attached dongles.
+#[cfg(feature = "usb")]
+fn devices_command() -> std::process::ExitCode {
+    let devices = adsb_source::usb::devices();
+    if devices.is_empty() {
+        println!("No RTL-SDR devices on the USB bus.");
+        println!();
+        println!("  - Is the dongle plugged in? Try a different port, and prefer one");
+        println!("    directly on the machine over a hub -- these draw ~300 mA.");
+        println!("  - On Linux, the DVB-T driver claims the device at boot. Check with");
+        println!("    `lsmod | grep dvb_usb_rtl28xxu` and blacklist it if it is loaded.");
+        println!("  - Permissions: install the udev rule from the rtl-sdr package, or");
+        println!("    run as a member of the `plugdev` group.");
+        return std::process::ExitCode::from(1);
+    }
+
+    println!("{} RTL-SDR device(s):", devices.len());
+    for device in &devices {
+        println!();
+        println!("  usb:{}", device.index);
+        println!("    name          {}", device.name);
+        if !device.manufacturer.is_empty() {
+            println!("    manufacturer  {}", device.manufacturer);
+        }
+        if !device.product.is_empty() {
+            println!("    product       {}", device.product);
+        }
+        println!(
+            "    serial        {}",
+            if device.serial.is_empty() {
+                "(none set)"
+            } else {
+                &device.serial
+            }
+        );
+    }
+    println!();
+    println!("Use one with `--source usb:INDEX`, or set SKYWARD_SOURCE=usb:INDEX.");
+    std::process::ExitCode::SUCCESS
+}
+
+/// Without the feature there is no librtlsdr to ask, so say so rather than
+/// printing an empty list -- "no devices" and "this binary cannot see devices"
+/// are different answers and only one of them means unplug something.
+#[cfg(not(feature = "usb"))]
+fn devices_command() -> std::process::ExitCode {
+    eprintln!(
+        "This binary was built without the `usb` feature, so it cannot enumerate \n\
+         dongles. Rebuild with:\n\n    cargo build --release --features usb\n\n\
+         (it needs librtlsdr -- `brew install librtlsdr` or `apt install librtlsdr-dev`)\n\n\
+         Or use `rtl_test -t`, which asks the same library."
+    );
+    std::process::ExitCode::from(2)
 }
 
 /// Decode hex messages from the command line.

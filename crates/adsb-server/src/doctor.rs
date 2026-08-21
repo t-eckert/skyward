@@ -116,7 +116,10 @@ pub fn run(config: &Config, args: &DoctorArgs) -> ExitCode {
 
     check_build(&mut report, config);
     check_config(&mut report, config);
+    check_station(&mut report, config);
+    check_usb(&mut report, config);
     check_clock(&mut report);
+    check_host(&mut report);
     check_filesystem(&mut report, config);
     check_self_test(&mut report, config);
 
@@ -230,15 +233,144 @@ fn check_config(report: &mut Report, config: &Config) {
         let rest: Vec<&str> = parts.collect();
         report.add(Level::Pass, &format!("config.{name}"), rest.join(" "));
     }
+}
 
-    if config.receiver().is_none() {
+/// The position actually in force, which is not necessarily the configured one.
+///
+/// `check_config` above prints what the configuration layers resolved to. That
+/// is no longer the whole story: a position set through the API is persisted
+/// and wins at the next start, so a station can be running somewhere the
+/// config file has never heard of. Reporting only the config value would
+/// reintroduce exactly the "the dump says X and the behaviour is Y" gap the
+/// provenance machinery exists to close.
+fn check_station(report: &mut Report, config: &Config) {
+    let (station, warning) = crate::station::StationState::load(
+        config.receiver().map(|(lat, lon)| crate::station::Station {
+            lat,
+            lon,
+            altitude_m: *config.receiver_alt_m,
+        }),
+        config.receiver_origin(),
+        Some(std::path::PathBuf::from(config.station_file.value.clone())),
+        *config.station_writable,
+    );
+
+    if let Some(warning) = warning {
+        report.add(Level::Warn, "station.overlay", warning);
+    }
+
+    match station.get() {
+        Some(position) => report.add(
+            Level::Pass,
+            "station.position",
+            format!(
+                "{:.4}, {:.4} at {:.0} m  ({})",
+                position.lat,
+                position.lon,
+                position.altitude_m,
+                station.origin().as_str()
+            ),
+        ),
+        None => report.add(
+            Level::Warn,
+            "station.position",
+            "unset: the range gate and local CPR are disabled. Set \
+             SKYWARD_RECEIVER_LAT and SKYWARD_RECEIVER_LON (three decimals is \
+             plenty), or set it from the web interface while the receiver runs",
+        ),
+    }
+
+    if station.overlay_shadows_config() {
+        let configured = station.configured().expect("shadowing implies configured");
         report.add(
             Level::Warn,
-            "config.receiver",
-            "position unset: the range gate and local CPR are disabled. Set \
-             SKYWARD_RECEIVER_LAT and SKYWARD_RECEIVER_LON (three decimals is plenty)",
+            "station.shadowed",
+            format!(
+                "{} holds a position set at runtime, which is overriding the \
+                 {:.4}, {:.4} that {} asks for. If you edited the config and nothing \
+                 changed, this is why -- `curl -X DELETE .../api/v1/receiver` or delete \
+                 that file",
+                *config.station_file,
+                configured.lat,
+                configured.lon,
+                station.configured_origin()
+            ),
         );
     }
+
+    if !station.is_writable() {
+        report.add(
+            Level::Pass,
+            "station.writable",
+            "false: the API cannot change the position, only configuration can",
+        );
+    }
+}
+
+/// What the USB bus offers, and whether this binary can even ask.
+///
+/// Runs before the radio is opened and regardless of `--offline`, because
+/// enumeration reads descriptors without claiming the device: it still answers
+/// while `rtl_tcp` holds the dongle, which is precisely the case where "open
+/// failed" tells you nothing about whether the hardware is there.
+#[cfg(feature = "usb")]
+fn check_usb(report: &mut Report, config: &Config) {
+    let devices = adsb_source::usb::devices();
+    let wants_usb = matches!(
+        adsb_source::SourceSpec::parse(&config.source),
+        Ok(adsb_source::SourceSpec::Usb { .. })
+    );
+
+    if devices.is_empty() {
+        // Only a failure if this station is supposed to be using one. A
+        // file-replay or rtl_tcp station legitimately has no dongle here.
+        let level = if wants_usb { Level::Fail } else { Level::Pass };
+        report.add(
+            level,
+            "usb.devices",
+            "no RTL-SDR on the USB bus. If one is plugged in: on Linux the DVB-T \
+             driver may have claimed it (`lsmod | grep dvb_usb_rtl28xxu`), or the \
+             udev rule is missing so the device is root-only",
+        );
+        return;
+    }
+
+    for device in &devices {
+        report.add(Level::Pass, "usb.devices", device.describe());
+    }
+
+    if let Ok(adsb_source::SourceSpec::Usb { index }) =
+        adsb_source::SourceSpec::parse(&config.source)
+        && !devices.iter().any(|d| d.index == index)
+    {
+        report.add(
+            Level::Fail,
+            "usb.index",
+            format!(
+                "source is usb:{index} but only indices 0..{} exist",
+                devices.len()
+            ),
+        );
+    }
+}
+
+/// Without the feature there is nothing to enumerate, and saying so is the
+/// point: otherwise `--source usb` fails at open time with a message about a
+/// missing device rather than a missing build flag.
+#[cfg(not(feature = "usb"))]
+fn check_usb(report: &mut Report, config: &Config) {
+    let wants_usb = matches!(
+        adsb_source::SourceSpec::parse(&config.source),
+        Ok(adsb_source::SourceSpec::Usb { .. })
+    );
+    let level = if wants_usb { Level::Fail } else { Level::Pass };
+    report.add(
+        level,
+        "usb.feature",
+        "this binary was built without the `usb` feature, so it cannot drive a \
+         dongle directly. Either rebuild with `--features usb`, or run rtl_tcp and \
+         set the source to tcp:127.0.0.1:1234",
+    );
 }
 
 /// A Pi with no RTC boots at 1970 and everything downstream is wrong.
@@ -268,6 +400,138 @@ fn check_clock(report: &mut Report) {
             format!("{now} epoch seconds, plausible"),
         );
     }
+}
+
+/// Things about the machine itself that make a receiver look broken.
+///
+/// # Undervoltage and throttling, which mimic bad reception exactly
+///
+/// A Raspberry Pi with a marginal power supply — and an RTL-SDR draws about
+/// 300 mA on top of the board, which is enough to push a phone charger over —
+/// drops its clock rather than crashing. A throttled Pi cannot consume samples
+/// at 2.4 MS/s, so samples are dropped, so the message count falls. Every
+/// visible symptom points at the antenna. The firmware has known all along and
+/// nobody asked it.
+///
+/// The same is true of a Pi that has heat-soaked inside a closed case, which
+/// is where an ADS-B receiver spends its life.
+///
+/// Linux-only: on macOS these files do not exist and the checks are skipped
+/// rather than faked.
+#[cfg(target_os = "linux")]
+fn check_host(report: &mut Report) {
+    // Bit 0: currently undervolted. Bit 1: currently throttled. Bits 16-19
+    // are the same conditions sticky since boot, which is what catches the
+    // brownout that happened at 3am.
+    const UNDERVOLTED_NOW: u64 = 1 << 0;
+    const THROTTLED_NOW: u64 = 1 << 2;
+    const UNDERVOLTED_EVER: u64 = 1 << 16;
+    const THROTTLED_EVER: u64 = 1 << 18;
+
+    if let Some(flags) = read_throttled() {
+        let mut problems = Vec::new();
+        if flags & UNDERVOLTED_NOW != 0 {
+            problems.push("undervoltage RIGHT NOW");
+        }
+        if flags & THROTTLED_NOW != 0 {
+            problems.push("throttled RIGHT NOW");
+        }
+        if flags & UNDERVOLTED_EVER != 0 && flags & UNDERVOLTED_NOW == 0 {
+            problems.push("undervoltage at some point since boot");
+        }
+        if flags & THROTTLED_EVER != 0 && flags & THROTTLED_NOW == 0 {
+            problems.push("throttled at some point since boot");
+        }
+
+        if problems.is_empty() {
+            report.add(
+                Level::Pass,
+                "host.power",
+                format!("no undervoltage or throttling since boot ({flags:#x})"),
+            );
+        } else {
+            report.add(
+                Level::Warn,
+                "host.power",
+                format!(
+                    "{} ({flags:#x}). A throttled Pi cannot keep up with 2.4 MS/s, so \
+                     samples are dropped and the message count falls -- which looks \
+                     exactly like a bad antenna. Use a supply rated for the board plus \
+                     ~300 mA for the dongle, and a short thick cable",
+                    problems.join(", ")
+                ),
+            );
+        }
+    }
+
+    if let Some(millidegrees) = read_first_number("/sys/class/thermal/thermal_zone0/temp") {
+        let celsius = millidegrees as f64 / 1000.0;
+        // Raspberry Pi firmware begins soft-throttling at 80 C.
+        let level = if celsius >= 80.0 {
+            Level::Warn
+        } else {
+            Level::Pass
+        };
+        report.add(
+            level,
+            "host.temperature",
+            if celsius >= 80.0 {
+                format!(
+                    "{celsius:.1} C -- at or past the point where the firmware starts \
+                     throttling. Open the case, add a heatsink, or move it out of the sun"
+                )
+            } else {
+                format!("{celsius:.1} C")
+            },
+        );
+    }
+
+    // Available, not free: on Linux "free" excludes the page cache and reads
+    // alarmingly low on a perfectly healthy machine.
+    if let Some(kib) = read_meminfo("MemAvailable") {
+        let mb = kib / 1024;
+        // The decoder holds a 512 KiB read buffer and, on USB, an 8 MiB ring;
+        // SQLite and the tracker are small. 64 MB free is comfortable, 32 is
+        // where a page-cache-starved SD card starts to hurt.
+        let level = if mb < 32 { Level::Warn } else { Level::Pass };
+        report.add(level, "host.memory", format!("{mb} MB available"));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_host(_report: &mut Report) {}
+
+/// `/sys/devices/platform/soc/soc:firmware/get_throttled`, or the vcgencmd
+/// equivalent. Absent on anything that is not a Raspberry Pi.
+#[cfg(target_os = "linux")]
+fn read_throttled() -> Option<u64> {
+    for path in [
+        "/sys/devices/platform/soc/soc:firmware/get_throttled",
+        "/sys/class/hwmon/hwmon0/get_throttled",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let text = text.trim();
+            let text = text.strip_prefix("0x").unwrap_or(text);
+            if let Ok(value) = u64::from_str_radix(text, 16) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_first_number(path: &str) -> Option<i64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn read_meminfo(key: &str) -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    text.lines()
+        .find(|line| line.starts_with(key))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
 }
 
 fn check_filesystem(report: &mut Report, config: &Config) {
@@ -593,6 +857,7 @@ mod tests {
     fn the_clock_check_accepts_the_present() {
         let mut report = Report::new();
         check_clock(&mut report);
+        check_host(&mut report);
         assert_eq!(report.checks[0].0, Level::Pass);
     }
 
@@ -600,13 +865,13 @@ mod tests {
     fn an_unset_receiver_position_warns_but_does_not_fail() {
         let config = Config::resolve(None, &CliOverrides::default()).unwrap();
         let mut report = Report::new();
-        check_config(&mut report, &config);
+        check_station(&mut report, &config);
         assert_eq!(report.worst(), Level::Warn);
         assert!(
             report
                 .checks
                 .iter()
-                .any(|(_, name, _)| name == "config.receiver")
+                .any(|(_, name, detail)| name == "station.position" && detail.contains("unset"))
         );
     }
 

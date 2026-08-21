@@ -12,9 +12,16 @@
 		lastSnapshotMs: number | null;
 		/** Overrides `connection` when the server is up but the radio is not. */
 		status?: 'streaming' | 'source-down' | 'disconnected';
+		/** Opens the station dialog. Omitted in Storybook and in `?chrome=0`. */
+		oneditstation?: () => void;
 	}
 
-	let { receiver, connection, lastSnapshotMs, status }: Props = $props();
+	let { receiver, connection, lastSnapshotMs, status, oneditstation }: Props = $props();
+
+	// An unset position is not a cosmetic gap: it disables the range gate and
+	// local CPR, and it leaves the map with nothing to centre on. It gets the
+	// one warm colour in the palette so it reads as something to fix.
+	const unset = $derived(receiver !== null && (receiver.lat === null || receiver.lon === null));
 
 	const view = $derived(status ?? (connection === "streaming" ? "streaming" : "disconnected"));
 	const live = $derived(view === 'streaming');
@@ -48,10 +55,28 @@
 	<div class="brand">
 		<span class="wordmark">SKYWARD</span>
 		<span class="rule"></span>
-		<span class="tnum place">
-			{receiver?.station ?? 'skyward'} · {station(receiver?.lat ?? null, receiver?.lon ?? null)}
-			{#if receiver}· {Math.round(receiver.altitude_m)} m{/if}
-		</span>
+		{#if oneditstation}
+			<button
+				class="tnum place editable"
+				class:unset
+				onclick={oneditstation}
+				title="Set the receiver position"
+			>
+				{receiver?.station ?? 'skyward'} · {station(
+					receiver?.lat ?? null,
+					receiver?.lon ?? null
+				)}
+				{#if receiver && !unset}· {Math.round(receiver.altitude_m)} m{/if}
+			</button>
+		{:else}
+			<span class="tnum place" class:unset>
+				{receiver?.station ?? 'skyward'} · {station(
+					receiver?.lat ?? null,
+					receiver?.lon ?? null
+				)}
+				{#if receiver && !unset}· {Math.round(receiver.altitude_m)} m{/if}
+			</span>
+		{/if}
 	</div>
 
 	<div class="status">
@@ -123,6 +148,40 @@
 		line-height: 16px;
 		color: var(--color-muted);
 		white-space: nowrap;
+	}
+
+	.editable {
+		padding: 2px 6px;
+		margin-inline-start: -6px;
+		font-family: inherit;
+		background: transparent;
+		border: var(--border-w) solid transparent;
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+	}
+
+	.editable:hover {
+		color: var(--color-ink);
+		border-color: var(--color-line);
+	}
+
+	.editable:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 1px;
+	}
+
+	/* Rust, never red -- the same warm colour the disconnected state uses,
+	   because an unset position is the same class of problem: the receiver is
+	   running and cannot do its job. */
+	.place.unset {
+		color: var(--color-alert);
+	}
+
+	.editable.unset::after {
+		content: ' · SET';
+		font-size: var(--size-label);
+		font-weight: var(--weight-label);
+		letter-spacing: var(--tracking-label);
 	}
 
 	.status {

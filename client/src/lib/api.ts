@@ -41,10 +41,30 @@ export interface AircraftEnvelope {
 	aircraft: Aircraft[];
 }
 
+/** A station position, as `PUT /api/v1/receiver` accepts it. */
+export interface StationPosition {
+	lat: number;
+	lon: number;
+	altitude_m: number;
+}
+
 export interface Receiver {
 	lat: number | null;
 	lon: number | null;
 	altitude_m: number;
+	/**
+	 * Where the position in force came from: `unset`, a config origin like
+	 * `$SKYWARD_RECEIVER_LAT`, the overlay file's path, or `set at runtime`.
+	 *
+	 * Shown verbatim in the station dialog. The whole reason the server tracks
+	 * provenance is so the answer to "did my edit take effect" is visible, and
+	 * hiding it in the client would throw that away at the last step.
+	 */
+	origin: string;
+	/** False when the receiver was started with `station_writable = false`. */
+	writable: boolean;
+	/** What a revert would go back to, if configuration supplies anything. */
+	configured: (StationPosition & { origin: string }) | null;
 	station: string;
 	version: string;
 	uptime_s: number;
@@ -127,8 +147,50 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
 	return (await response.json()) as T;
 }
 
+/**
+ * A mutating request whose error body is worth reading.
+ *
+ * The server answers a rejected position with `400` and an `error` naming the
+ * field and the range — "lat 91 is not a latitude (-90 to 90)". Throwing
+ * `responded 400` instead would replace a sentence the operator can act on
+ * with a number they cannot.
+ */
+async function send<T>(path: string, method: 'PUT' | 'DELETE', body?: unknown): Promise<T> {
+	const response = await fetch(path, {
+		method,
+		headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+		body: body === undefined ? undefined : JSON.stringify(body)
+	});
+	const text = await response.text();
+	let parsed: unknown = null;
+	try {
+		parsed = text ? JSON.parse(text) : null;
+	} catch {
+		// Fall through to the status-code message below.
+	}
+	if (!response.ok) {
+		const message =
+			parsed && typeof parsed === 'object' && 'error' in parsed
+				? String((parsed as { error: unknown }).error)
+				: `${path} responded ${response.status}`;
+		throw new Error(message);
+	}
+	return parsed as T;
+}
+
 export const api = {
 	receiver: (signal?: AbortSignal) => get<Receiver>('/api/v1/receiver', signal),
+
+	/**
+	 * Move the station. Resolves to the same shape `receiver()` returns, so
+	 * the caller applies the response rather than re-fetching and racing its
+	 * own write.
+	 */
+	setReceiver: (position: StationPosition) =>
+		send<Receiver>('/api/v1/receiver', 'PUT', position),
+
+	/** Discard a runtime position and go back to what configuration says. */
+	clearReceiver: () => send<Receiver>('/api/v1/receiver', 'DELETE'),
 	stats: (signal?: AbortSignal) => get<Stats>('/api/v1/stats', signal),
 	health: (signal?: AbortSignal) => get<Health>('/healthz', signal),
 	aircraft: (signal?: AbortSignal) => get<AircraftEnvelope>('/api/v1/aircraft', signal),

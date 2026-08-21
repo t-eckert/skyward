@@ -21,8 +21,12 @@
 //!   ground track, which differs from heading by the wind correction angle.
 //! - `/api/v1/receiver` gives you the station position, so the range ring is
 //!   not hardcoded in the client and the same client works against any station.
+//!   `PUT` moves it and `DELETE` reverts it to configuration — both take
+//!   effect inside a second, without restarting the decoder or dropping a
+//!   single tracked aircraft.
 
 use crate::run::AppState;
+use crate::station::Station;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -42,7 +46,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/api/v1/receiver", get(receiver))
+        .route(
+            "/api/v1/receiver",
+            get(receiver).put(set_receiver).delete(clear_receiver),
+        )
         .route("/api/v1/stats", get(stats))
         .route("/api/v1/aircraft", get(aircraft_list))
         .route("/api/v1/aircraft/{icao}", get(aircraft_one))
@@ -196,11 +203,24 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-async fn receiver(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "lat": state.receiver.map(|(lat, _)| lat),
-        "lon": state.receiver.map(|(_, lon)| lon),
-        "altitude_m": state.receiver_alt_m,
+/// The station position, plus enough context for a client to offer to change
+/// it: whether writes are allowed at all, where the current value came from,
+/// and what configuration would revert to.
+fn receiver_json(state: &AppState) -> serde_json::Value {
+    let station = state.station.get();
+    let configured = state.station.configured();
+    serde_json::json!({
+        "lat": station.map(|s| s.lat),
+        "lon": station.map(|s| s.lon),
+        "altitude_m": station.map(|s| s.altitude_m).unwrap_or(0.0),
+        "origin": state.station.origin().as_str(),
+        "writable": state.station.is_writable(),
+        "configured": configured.map(|s| serde_json::json!({
+            "lat": s.lat,
+            "lon": s.lon,
+            "altitude_m": s.altitude_m,
+            "origin": state.station.configured_origin(),
+        })),
         "station": state.station_name,
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_s": state.started.elapsed().as_secs(),
@@ -208,7 +228,62 @@ async fn receiver(State(state): State<Arc<AppState>>) -> Json<serde_json::Value>
         "frequency_hz": state.frequency_hz,
         "impl_set": state.impl_set.clone(),
         "source": state.source_description.clone(),
-    }))
+    })
+}
+
+async fn receiver(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(receiver_json(&state))
+}
+
+/// Move the station.
+///
+/// Returns the same body `GET` does, so a client can apply the response
+/// directly instead of re-fetching and racing its own write.
+///
+/// A rejected position is a `400` with the reason in `error` — not a `500`,
+/// and never a silent clamp. Clamping 91° to 90° would put the station at the
+/// pole and produce a receiver that hears nothing for a reason nobody would
+/// think to look for.
+async fn set_receiver(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<Station>,
+) -> Response {
+    match state.station.set(request) {
+        Ok(()) => {
+            tracing::info!(
+                lat = request.lat,
+                lon = request.lon,
+                altitude_m = request.altitude_m,
+                "station position set through the API"
+            );
+            Json(receiver_json(&state)).into_response()
+        }
+        Err(e) => {
+            let status = if state.station.is_writable() {
+                StatusCode::BAD_REQUEST
+            } else {
+                // Not the request's fault: this receiver was started with
+                // writes off, and no amount of fixing the body will help.
+                StatusCode::FORBIDDEN
+            };
+            (status, Json(serde_json::json!({ "error": e }))).into_response()
+        }
+    }
+}
+
+/// Discard a runtime position and go back to what configuration says.
+async fn clear_receiver(State(state): State<Arc<AppState>>) -> Response {
+    match state.station.clear() {
+        Ok(()) => {
+            tracing::info!("station position reverted to the configured value");
+            Json(receiver_json(&state)).into_response()
+        }
+        Err(e) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 async fn stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

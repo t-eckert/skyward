@@ -115,15 +115,13 @@ pub fn load_dotenv() -> &'static DotEnv {
         // already claimed, *then* apply it. `dotenvy::dotenv` does not
         // override existing variables, so the two agree.
         let keys = match dotenvy::dotenv_iter() {
-            Ok(iter) => keys_supplied_by_file(iter.flatten(), |key| {
-                std::env::var_os(key).is_some()
-            }),
+            Ok(iter) => {
+                keys_supplied_by_file(iter.flatten(), |key| std::env::var_os(key).is_some())
+            }
             Err(_) => HashSet::new(),
         };
 
-        let path = dotenvy::dotenv()
-            .ok()
-            .map(|p| p.display().to_string());
+        let path = dotenvy::dotenv().ok().map(|p| p.display().to_string());
 
         DotEnv { path, keys }
     })
@@ -218,8 +216,18 @@ impl StageNames {
         };
 
         StageNames {
-            magnitude: layer(base.magnitude, &file.magnitude, "SKYWARD_MAG", &cli.magnitude),
-            detector: layer(base.detector, &file.detector, "SKYWARD_DETECT", &cli.detector),
+            magnitude: layer(
+                base.magnitude,
+                &file.magnitude,
+                "SKYWARD_MAG",
+                &cli.magnitude,
+            ),
+            detector: layer(
+                base.detector,
+                &file.detector,
+                "SKYWARD_DETECT",
+                &cli.detector,
+            ),
             slicer: layer(base.slicer, &file.slicer, "SKYWARD_SLICE", &cli.slicer),
             validator: layer(
                 base.validator,
@@ -244,6 +252,9 @@ pub struct FileConfig {
     pub db_path: Option<String>,
     pub cors_origins: Option<Vec<String>>,
     pub log_format: Option<String>,
+    pub retention_hours: Option<u32>,
+    pub station_file: Option<String>,
+    pub station_writable: Option<bool>,
     pub impl_set: Option<String>,
     /// Per-stage overrides, layered on top of whichever preset `impl_set`
     /// names. Set one to swap a single stage without defining a whole preset
@@ -307,6 +318,12 @@ pub struct Config {
     pub db_path: Sourced<String>,
     pub cors_origins: Sourced<Vec<String>>,
     pub log_format: Sourced<String>,
+    /// How long recorded history is kept, in hours. `0` keeps everything.
+    pub retention_hours: Sourced<u32>,
+    /// Where a position set through the API is persisted.
+    pub station_file: Sourced<String>,
+    /// Whether the API may change the station position at all.
+    pub station_writable: Sourced<bool>,
     pub impl_set: Sourced<String>,
     pub magnitude: Sourced<String>,
     pub detector: Sourced<String>,
@@ -380,7 +397,6 @@ impl Config {
 
         let stage = StageNames::resolve(&impl_set, &file_stage, &file_origin, cli);
 
-
         let config = Config {
             source: Sourced::new("tcp:127.0.0.1:1234".to_string(), Origin::Default)
                 .or_layer(file.source, file_origin.clone())
@@ -400,10 +416,7 @@ impl Config {
 
             gain_db: Sourced::new("49.6".to_string(), Origin::Default)
                 .or_layer(file.gain_db, file_origin.clone())
-                .or_layer(
-                    env_string("SKYWARD_GAIN_DB"),
-                    env_origin("SKYWARD_GAIN_DB"),
-                )
+                .or_layer(env_string("SKYWARD_GAIN_DB"), env_origin("SKYWARD_GAIN_DB"))
                 .or_layer(cli.gain_db.clone(), Origin::Cli),
 
             bind: Sourced::new("0.0.0.0:8080".to_string(), Origin::Default)
@@ -413,10 +426,7 @@ impl Config {
 
             db_path: Sourced::new("skyward.db".to_string(), Origin::Default)
                 .or_layer(file.db_path, file_origin.clone())
-                .or_layer(
-                    env_string("SKYWARD_DB_PATH"),
-                    env_origin("SKYWARD_DB_PATH"),
-                )
+                .or_layer(env_string("SKYWARD_DB_PATH"), env_origin("SKYWARD_DB_PATH"))
                 .or_layer(cli.db_path.clone(), Origin::Cli),
 
             cors_origins: Sourced::new(vec!["http://localhost:5173".to_string()], Origin::Default)
@@ -434,6 +444,37 @@ impl Config {
                     env_origin("SKYWARD_LOG_FORMAT"),
                 )
                 .or_layer(cli.log_format.clone(), Origin::Cli),
+
+            // 24 hours of positions is a few tens of megabytes at a busy
+            // site, which a Pi's SD card will not notice. It was hardcoded
+            // before, which meant a station that wanted a week of history had
+            // to be recompiled, and one on a nearly-full card had no way to
+            // ask for less.
+            retention_hours: Sourced::new(24u32, Origin::Default)
+                .or_layer(file.retention_hours, file_origin.clone())
+                .or_layer(
+                    env_parsed("SKYWARD_RETENTION_HOURS"),
+                    env_origin("SKYWARD_RETENTION_HOURS"),
+                ),
+
+            station_file: Sourced::new("skyward-station.toml".to_string(), Origin::Default)
+                .or_layer(file.station_file, file_origin.clone())
+                .or_layer(
+                    env_string("SKYWARD_STATION_FILE"),
+                    env_origin("SKYWARD_STATION_FILE"),
+                ),
+
+            // Default open. The API has no authentication of any kind, so on
+            // a station bound to 0.0.0.0 this is a control anyone on the LAN
+            // can reach -- which is the same thing that is already true of
+            // every other endpoint, and this one only moves a map pin. Set it
+            // false to pin the position to configuration.
+            station_writable: Sourced::new(true, Origin::Default)
+                .or_layer(file.station_writable, file_origin.clone())
+                .or_layer(
+                    env_parsed("SKYWARD_STATION_WRITABLE"),
+                    env_origin("SKYWARD_STATION_WRITABLE"),
+                ),
 
             impl_set: impl_set.clone(),
 
@@ -486,6 +527,18 @@ impl Config {
         }
 
         adsb_source::Gain::parse(&self.gain_db).map_err(|e| ConfigError::Invalid(e.to_string()))?;
+
+        // A year of positions at a busy site is tens of gigabytes, which on a
+        // Pi means a full SD card and a receiver that stops writing. Nothing
+        // stops you asking for it -- `0` means forever and is honest about it
+        // -- but a value this large is far more often a units mistake.
+        if *self.retention_hours > 8760 {
+            return Err(ConfigError::Invalid(format!(
+                "retention_hours is {}, over a year. This is hours, not minutes. \
+                 Use 0 if you really mean keep everything forever",
+                *self.retention_hours
+            )));
+        }
 
         if !matches!(self.log_format.as_str(), "text" | "json") {
             return Err(ConfigError::Invalid(format!(
@@ -548,6 +601,12 @@ impl Config {
         }
     }
 
+    /// Where the configured receiver position came from, for the station
+    /// layer to attribute it once the runtime overlay is on top.
+    pub fn receiver_origin(&self) -> String {
+        self.receiver_lat.origin.to_string()
+    }
+
     pub fn receiver(&self) -> Option<(f64, f64)> {
         match (*self.receiver_lat, *self.receiver_lon) {
             (Some(lat), Some(lon)) => Some((lat, lon)),
@@ -588,6 +647,25 @@ impl Config {
             &self.log_format.origin,
         );
         row(
+            "retention_hours",
+            if *self.retention_hours == 0 {
+                "0 (keep everything)".to_string()
+            } else {
+                self.retention_hours.value.to_string()
+            },
+            &self.retention_hours.origin,
+        );
+        row(
+            "station_file",
+            self.station_file.value.clone(),
+            &self.station_file.origin,
+        );
+        row(
+            "station_writable",
+            self.station_writable.value.to_string(),
+            &self.station_writable.origin,
+        );
+        row(
             "impl_set",
             self.impl_set.value.clone(),
             &self.impl_set.origin,
@@ -597,7 +675,11 @@ impl Config {
             self.magnitude.value.clone(),
             &self.magnitude.origin,
         );
-        row("detector", self.detector.value.clone(), &self.detector.origin);
+        row(
+            "detector",
+            self.detector.value.clone(),
+            &self.detector.origin,
+        );
         row("slicer", self.slicer.value.clone(), &self.slicer.origin);
         row(
             "validator",

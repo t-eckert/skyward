@@ -4,6 +4,7 @@ import {
 	type AircraftEnvelope,
 	type Health,
 	type Receiver,
+	type StationPosition,
 	type Stats
 } from './api';
 
@@ -279,6 +280,32 @@ export class Live {
 	get outageMs(): number | null {
 		if (this.connection !== 'disconnected' || this.disconnectedAtMs === null) return null;
 		return Math.max(0, this.tick - this.disconnectedAtMs);
+	}
+
+	/**
+	 * Move the station.
+	 *
+	 * The response is applied directly rather than triggering a re-fetch: the
+	 * metadata poll runs every five seconds, so re-fetching would leave the
+	 * header showing the old position for up to that long after a save the
+	 * user just watched succeed — and would race the poll besides.
+	 *
+	 * Errors are re-thrown for the caller to render. Swallowing them here
+	 * would leave a dialog that closes on a rejected position, which reads as
+	 * success.
+	 */
+	async setStation(position: StationPosition): Promise<void> {
+		this.receiver = await api.setReceiver(position);
+	}
+
+	/** Discard a runtime position and revert to the configured one. */
+	async clearStation(): Promise<void> {
+		this.receiver = await api.clearReceiver();
+	}
+
+	/** True when nothing anywhere has told the receiver where it is. */
+	get stationUnset(): boolean {
+		return this.receiver !== null && (this.receiver.lat === null || this.receiver.lon === null);
 	}
 
 	get aircraft(): Aircraft[] {

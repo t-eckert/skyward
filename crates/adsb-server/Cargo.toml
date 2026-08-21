@@ -10,6 +10,13 @@ description = "The skyward binary: run, doctor, bench, bundle."
 name = "skyward"
 path = "src/main.rs"
 
+[features]
+# Off by default so the ordinary build has no native dependency and an
+# aarch64 cross-build is unremarkable. `--features usb` links librtlsdr and
+# lets `--source usb` drive the dongle directly, with no rtl_tcp in between.
+default = []
+usb = ["adsb-source/usb"]
+
 [dependencies]
 adsb-core.workspace = true
 adsb-dsp.workspace = true
