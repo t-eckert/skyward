@@ -159,6 +159,21 @@ pub trait PositionSolver: Send {
     fn name(&self) -> &'static str;
     fn describe(&self) -> &'static str;
 
+    /// Adopt new plausibility limits without rebuilding the solver.
+    ///
+    /// # Why a setter and not just a constructor argument
+    ///
+    /// The receiver position is a gate input, and it is the one input an
+    /// operator changes *while the receiver is running* — moving the station,
+    /// or setting it for the first time from the web interface. Rebuilding
+    /// the solver to change it would throw away every aircraft's accumulated
+    /// even/odd CPR state, so every aircraft in the air would vanish and
+    /// re-appear one message later. Keeping the state and swapping the limits
+    /// is the difference between a settings change and a visible outage.
+    ///
+    /// The default ignores it, which is right for a solver with no gates.
+    fn set_gates(&mut self, _gates: Gates) {}
+
     /// Offer a position frame. `at` is monotonic; `now_ms` is wall clock.
     fn update(
         &self,
@@ -217,6 +232,10 @@ impl PositionSolver for GlobalCprSolver {
 
     fn describe(&self) -> &'static str {
         "even/odd pairs only, with range and implied-speed gates"
+    }
+
+    fn set_gates(&mut self, gates: Gates) {
+        self.gates = gates;
     }
 
     fn update(

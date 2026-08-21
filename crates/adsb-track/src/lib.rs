@@ -227,6 +227,30 @@ impl Tracker {
         self.solver.name()
     }
 
+    /// The plausibility limits currently in force.
+    pub fn gates(&self) -> Gates {
+        self.config.gates
+    }
+
+    /// Move the station, keeping every aircraft's CPR state.
+    ///
+    /// Returns true if the position actually changed. The range gate reads it
+    /// on the next fix, so a station set from the web interface takes effect
+    /// within one message rather than at the next restart.
+    ///
+    /// Note what is deliberately *not* done here: previously-accepted fixes
+    /// are not re-examined. They were admitted under the old gate and are
+    /// already drawn; retroactively deleting them would make a position change
+    /// look like an outage. The gate governs what is admitted next.
+    pub fn set_receiver(&mut self, receiver: Option<(f64, f64)>) -> bool {
+        if self.config.gates.receiver == receiver {
+            return false;
+        }
+        self.config.gates.receiver = receiver;
+        self.solver.set_gates(self.config.gates);
+        true
+    }
+
     /// Fold one validated frame into the aircraft set.
     pub fn observe(&mut self, frame: &Frame, tick: Tick, rssi_dbfs: Option<f32>) -> Update {
         let icao = frame.icao();
@@ -459,6 +483,47 @@ mod tests {
         }
         assert_eq!(t.stats().fixes, 1);
         assert_eq!(t.stats().need_pair, 1);
+    }
+
+    /// Moving the station mid-flight must change what the range gate admits,
+    /// without discarding the CPR state that got us there.
+    ///
+    /// This is the whole point of `set_receiver`: the operator sets the
+    /// position from the web interface on a receiver that has been up for an
+    /// hour, and the next fix has to be judged against the new position. A
+    /// rebuild would have worked too -- and would have emptied the map.
+    #[test]
+    fn moving_the_receiver_changes_the_range_gate_immediately() {
+        // The canonical pair resolves near the Netherlands. Ottawa is 5500 km
+        // away, well outside the 400 km gate.
+        let mut t = Tracker::new(ottawa_config());
+        let tick = Tick::now();
+        observe(&mut t, "8D40621D58C382D690C8AC2863A7", tick);
+        observe(&mut t, "8D40621D58C386435CC412692AD6", tick);
+        assert_eq!(
+            t.stats().rejected_out_of_range,
+            1,
+            "an Ottawa station must not believe a Dutch position"
+        );
+        assert_eq!(t.stats().fixes, 0);
+
+        // Move the station to Amsterdam while the aircraft is still tracked.
+        assert!(t.set_receiver(Some((52.3, 4.8))), "the position changed");
+        assert!(
+            !t.set_receiver(Some((52.3, 4.8))),
+            "setting the same position again is not a change"
+        );
+
+        // The aircraft is still here: its even/odd state was not thrown away.
+        assert!(t.get(Icao::new(0x40_62_1D)).is_some());
+
+        // One more frame of either parity re-pairs against the retained one.
+        match observe(&mut t, "8D40621D58C386435CC412692AD6", tick) {
+            Update::NewPosition(fix) => {
+                assert!((fix.lat - 52.2658).abs() < 0.01, "lat {}", fix.lat);
+            }
+            other => panic!("the new gate should admit this fix, got {other:?}"),
+        }
     }
 
     #[test]
