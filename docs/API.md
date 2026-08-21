@@ -1,43 +1,28 @@
 # The HTTP API
 
-Every endpoint, with responses captured from a running receiver rather than
-written from memory.
+Every endpoint, with responses captured from a running receiver rather than written from memory.
 
-Base URL is wherever `bind` points — `http://raspberrypi.local:8080` on a
-typical Pi. There is no authentication; see
-[Security](CONFIGURATION.md#security).
+Base URL is wherever `bind` points — `http://raspberrypi.local:8080` on a typical Pi. There is no authentication; see [Security](CONFIGURATION.md#security).
 
 ## Contract notes
 
-Four conventions run through everything below, and each exists because of a
-specific failure.
+Four conventions run through everything below, and each exists because of a specific failure.
 
-**Every envelope carries `now_ms`, the server's clock.** Compute ages against
-it, never against `Date.now()`. A laptop forty seconds out of sync would
-otherwise render every aircraft as stale.
+**Every envelope carries `now_ms`, the server's clock.** Compute ages against it, never against `Date.now()`. A laptop forty seconds out of sync would otherwise render every aircraft as stale.
 
-**All times are epoch milliseconds.** Never a formatted string. An earlier
-schema's `"2026-08-06 12:00:00"` is parsed as *local* time by V8 and is
-`Invalid Date` in older Safari.
+**All times are epoch milliseconds.** Never a formatted string. An earlier schema's `"2026-08-06 12:00:00"` is parsed as *local* time by V8 and is `Invalid Date` in older Safari.
 
-**Units are in the field names**, and it is `track_deg` — ADS-B reports ground
-track, which differs from heading by the wind correction angle.
+**Units are in the field names**, and it is `track_deg` — ADS-B reports ground track, which differs from heading by the wind correction angle.
 
-**An unknown `/api/...` path is a JSON 404, not the app.** The web client is
-served from a router fallback, which otherwise catches every unmatched path.
-Without a reserved-prefix list, `GET /api/v1/aircaft` returned `200` and a page
-of HTML, so `fetch` resolved successfully and the client fell over parsing
-`<!doctype html>` as JSON — a long way from the URL that was actually wrong.
+**An unknown `/api/...` path is a JSON 404, not the app.** The web client is served from a router fallback, which otherwise catches every unmatched path. Without a reserved-prefix list, `GET /api/v1/aircaft` returned `200` and a page of HTML, so `fetch` resolved successfully and the client fell over parsing `<!doctype html>` as JSON — a long way from the URL that was actually wrong.
 
-Optional fields are **omitted**, not null. An aircraft that has not reported an
-altitude has no `altitude_ft` key; it is not at sea level.
+Optional fields are **omitted**, not null. An aircraft that has not reported an altitude has no `altitude_ft` key; it is not at sea level.
 
 ---
 
 ## `GET /healthz`
 
-Freshness, not liveness. Returns **`200`** for `ok` and `degraded`, **`503`**
-for `stalled`, so a bare `curl -f` is a valid probe.
+Freshness, not liveness. Returns **`200`** for `ok` and `degraded`, **`503`** for `stalled`, so a bare `curl -f` is a valid probe.
 
 ```json
 {
@@ -72,9 +57,7 @@ for `stalled`, so a bare `curl -f` is a valid probe.
 | `decode.last_message_age_s` | `-1` when nothing has ever been decoded |
 | `warnings` | Prose, ready to show a person: an unsynced clock, dropped rows, write errors, overruns |
 
-The one thing this endpoint deliberately does *not* do is report `ok` because
-the process is up. An earlier version answered `ok` whenever SQLite was
-readable, which stayed true for hours after the decoder died.
+The one thing this endpoint deliberately does *not* do is report `ok` because the process is up. An earlier version answered `ok` whenever SQLite was readable, which stayed true for hours after the decoder died.
 
 ## `GET /readyz`
 
@@ -82,8 +65,7 @@ readable, which stayed true for hours after the decoder died.
 { "ready": true }
 ```
 
-`200` once a snapshot has been published, `503` before that with a `reason`.
-Use it as a startup probe; use `/healthz` as a liveness probe.
+`200` once a snapshot has been published, `503` before that with a `reason`. Use it as a startup probe; use `/healthz` as a liveness probe.
 
 ---
 
@@ -114,19 +96,13 @@ Station identity and position, plus everything needed to offer to change it.
 
 `lat` and `lon` are `null` when no position is set anywhere.
 
-`origin` is where the position in force came from: `unset`, a config origin
-like `$SKYWARD_RECEIVER_LAT` or `skyward.toml`, the overlay file's path, or
-`set at runtime`. `configured` is what a revert would go back to, and is `null`
-when configuration supplies nothing.
+`origin` is where the position in force came from: `unset`, a config origin like `$SKYWARD_RECEIVER_LAT` or `skyward.toml`, the overlay file's path, or `set at runtime`. `configured` is what a revert would go back to, and is `null` when configuration supplies nothing.
 
-The point of serving the position at all is that the map's range ring is not
-hardcoded in the client, so the same client works against any station.
+The point of serving the position at all is that the map's range ring is not hardcoded in the client, so the same client works against any station.
 
 ## `PUT /api/v1/receiver`
 
-Move the station. Takes effect within a second — the tracker adopts the new
-range gate without rebuilding, so nothing currently tracked is lost — and is
-persisted so it survives a restart.
+Move the station. Takes effect within a second — the tracker adopts the new range gate without rebuilding, so nothing currently tracked is lost — and is persisted so it survives a restart.
 
 ```bash
 curl -X PUT http://localhost:8080/api/v1/receiver \
@@ -136,8 +112,7 @@ curl -X PUT http://localhost:8080/api/v1/receiver \
 
 `altitude_m` is optional and defaults to 0. It is metres above sea level.
 
-The response body is identical to `GET`, so a client can apply it directly
-instead of re-fetching and racing its own write.
+The response body is identical to `GET`, so a client can apply it directly instead of re-fetching and racing its own write.
 
 | Status | When |
 |---|---|
@@ -145,34 +120,25 @@ instead of re-fetching and racing its own write.
 | `400` | Not a point on the earth, or the persistence write failed |
 | `403` | `station_writable = false` |
 
-A rejected value is never silently clamped. Clamping 91° to 90° would put the
-station at the pole and produce a receiver that hears nothing, for a reason
-nobody would think to look for:
+A rejected value is never silently clamped. Clamping 91° to 90° would put the station at the pole and produce a receiver that hears nothing, for a reason nobody would think to look for:
 
 ```json
 { "error": "lat 91 is not a latitude (-90 to 90)" }
 ```
 
-`0, 0` is accepted — it is a real coordinate in the Gulf of Guinea, and the
-API should not second-guess someone who types it. Unsetting is what `DELETE`
-is for.
+`0, 0` is accepted — it is a real coordinate in the Gulf of Guinea, and the API should not second-guess someone who types it. Unsetting is what `DELETE` is for.
 
-Note that a position set this way **outranks the config file and the
-environment** from then on. See [The station
-overlay](CONFIGURATION.md#the-station-overlay).
+Note that a position set this way **outranks the config file and the environment** from then on. See [The station overlay](CONFIGURATION.md#the-station-overlay).
 
 ## `DELETE /api/v1/receiver`
 
-Discard a runtime position, delete the overlay file, and revert to whatever
-configuration says — which may be nothing. Returns the same body as `GET`, or
-`403` when writes are disabled.
+Discard a runtime position, delete the overlay file, and revert to whatever configuration says — which may be nothing. Returns the same body as `GET`, or `403` when writes are disabled.
 
 ---
 
 ## `GET /api/v1/aircraft`
 
-Everything currently tracked, served from the in-memory snapshot the decoder
-publishes. No locks, no database.
+Everything currently tracked, served from the in-memory snapshot the decoder publishes. No locks, no database.
 
 | Query | Meaning |
 |---|---|
@@ -228,8 +194,7 @@ One aircraft, `{ "now_ms": ..., "aircraft": {...} }`, or `404`:
 
 ## `GET /api/v1/aircraft/{icao}/track`
 
-The recorded track, from SQLite, **oldest fix first** so it can be drawn as a
-line without sorting.
+The recorded track, from SQLite, **oldest fix first** so it can be drawn as a line without sorting.
 
 | Query | Default | Notes |
 |---|---|---|
@@ -247,12 +212,9 @@ line without sorting.
 }
 ```
 
-The query runs newest-first internally so `limit` keeps the recent tail, then
-reverses. It happens inside `spawn_blocking`, so a slow SD card parks a
-blocking thread rather than a tokio worker.
+The query runs newest-first internally so `limit` keeps the recent tail, then reverses. It happens inside `spawn_blocking`, so a slow SD card parks a blocking thread rather than a tokio worker.
 
-How much history exists depends on `retention_hours` (24 by default) and on the
-movement filter, which only writes a row when an aircraft has actually moved.
+How much history exists depends on `retention_hours` (24 by default) and on the movement filter, which only writes a row when an aircraft has actually moved.
 
 ---
 
@@ -274,22 +236,11 @@ source.addEventListener('snapshot', (e) => {
 });
 ```
 
-SSE rather than WebSocket because the traffic is one-way, `EventSource`
-reconnects by itself, it survives proxies, and it is about five lines in
-SvelteKit. There are no client-to-server messages, so an upgrade handshake
-would buy nothing.
+SSE rather than WebSocket because the traffic is one-way, `EventSource` reconnects by itself, it survives proxies, and it is about five lines in SvelteKit. There are no client-to-server messages, so an upgrade handshake would buy nothing.
 
-**A dead stream does not necessarily raise an error.** With the receiver
-stopped behind a proxy the socket stayed open, `onerror` never fired, and a
-client happily reported STREAMING over a sixteen-second-old snapshot — ages
-included, because they are computed against the server clock in the envelope,
-which had stopped advancing too. Treat silence as failure: the bundled client
-declares the stream dead after six seconds without a snapshot, and takes over
-`EventSource`'s own retry so it can show a real countdown.
+**A dead stream does not necessarily raise an error.** With the receiver stopped behind a proxy the socket stayed open, `onerror` never fired, and a client happily reported STREAMING over a sixteen-second-old snapshot — ages included, because they are computed against the server clock in the envelope, which had stopped advancing too. Treat silence as failure: the bundled client declares the stream dead after six seconds without a snapshot, and takes over `EventSource`'s own retry so it can show a real countdown.
 
-And note what a live stream proves: that the *server* is alive. Only
-`/healthz` knows whether samples are still arriving from the tuner. An
-unplugged antenna produces snapshots on schedule that are simply empty.
+And note what a live stream proves: that the *server* is alive. Only `/healthz` knows whether samples are still arriving from the tuner. An unplugged antenna produces snapshots on schedule that are simply empty.
 
 ## `GET /api/v1/stats`
 
@@ -317,24 +268,14 @@ Decoder counters, polled by the client's scoreboard.
 
 Two derived figures are worth computing, and one of them is a trap:
 
-**Realtime factor** — `samples / (configured_sample_rate_hz × uptime_s)`. Below
-1.0 means samples are being dropped, which looks like bad reception and is
-software.
+**Realtime factor** — `samples / (configured_sample_rate_hz × uptime_s)`. Below 1.0 means samples are being dropped, which looks like bad reception and is software.
 
-**Yield** — `crc_ok / candidates`. **Report it; never optimise it.** A better
-detector proposes more marginal candidates, so yield *falls* as messages rise.
-Tuning for yield tunes the detector backwards.
+**Yield** — `crc_ok / candidates`. **Report it; never optimise it.** A better detector proposes more marginal candidates, so yield *falls* as messages rise. Tuning for yield tunes the detector backwards.
 
 ---
 
 ## Everything else
 
-Any path that is not an endpoint above and does not start with `api/`,
-`healthz` or `readyz` is answered with the web client's `index.html`. That is
-what makes a deep link work: `/aircraft/A0A41F` is a client route with no file
-behind it, so a reload has to be resolved in the browser.
+Any path that is not an endpoint above and does not start with `api/`, `healthz` or `readyz` is answered with the web client's `index.html`. That is what makes a deep link work: `/aircraft/A0A41F` is a client route with no file behind it, so a reload has to be resolved in the browser.
 
-`index.html` is served `Cache-Control: no-cache`; everything under
-`_app/immutable/` is content-hashed and served `immutable` for a year. A cached
-`index.html` would point at asset names that no longer exist after an upgrade,
-and the app would fail to boot.
+`index.html` is served `Cache-Control: no-cache`; everything under `_app/immutable/` is content-hashed and served `immutable` for a year. A cached `index.html` would point at asset names that no longer exist after an upgrade, and the app would fail to boot.

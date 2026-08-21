@@ -1,9 +1,6 @@
 # Running skyward on a Raspberry Pi
 
-skyward is one binary with the web client compiled in. A deployment is
-therefore short: prepare the OS, get a binary onto the Pi, point it at the
-radio, let systemd keep it alive. This guide is written for a headless Pi
-reached over SSH — the machine skyward was designed for.
+skyward is one binary with the web client compiled in. A deployment is therefore short: prepare the OS, get a binary onto the Pi, point it at the radio, let systemd keep it alive. This guide is written for a headless Pi reached over SSH — the machine skyward was designed for.
 
 Two shapes of deployment are supported, and the first one is simpler:
 
@@ -14,27 +11,16 @@ Two shapes of deployment are supported, and the first one is simpler:
 | Processes | one | two |
 | Source | `SKYWARD_SOURCE=usb` | `SKYWARD_SOURCE=tcp:127.0.0.1:1234` |
 
-Direct USB is the default recommendation because it removes a process, a unit,
-and a localhost socket carrying 4.8 MB/s. `rtl_tcp` remains fully supported —
-it is the right answer when the dongle is on a *different* machine from the
-decoder, and it is the fallback if the `usb` feature will not build for you.
+Direct USB is the default recommendation because it removes a process, a unit, and a localhost socket carrying 4.8 MB/s. `rtl_tcp` remains fully supported — it is the right answer when the dongle is on a *different* machine from the decoder, and it is the fallback if the `usb` feature will not build for you.
 
-Everything skyward-specific below (flag names, environment variables, ports,
-`doctor` checks) comes from the code in this repository. The OS steps (`apt`,
-`udev`, `systemd`) are ordinary Debian.
+Everything skyward-specific below (flag names, environment variables, ports, `doctor` checks) comes from the code in this repository. The OS steps (`apt`, `udev`, `systemd`) are ordinary Debian.
 
 ## What you need
 
-- A Raspberry Pi 3, 4, 5, or Zero 2 W running **64-bit Raspberry Pi OS**
-  (Bookworm or newer). 64-bit matters: the toolchain and release profile target
-  `aarch64`.
-- An **RTL-SDR dongle** — RTL2832U with an R820T/R820T2 tuner is what the
-  defaults assume — and a **1090 MHz antenna**.
-- A power supply with headroom. The dongle draws about 300 mA on top of the
-  board, and an undervolted Pi throttles rather than crashing, which looks
-  exactly like bad reception. `skyward doctor` checks for this.
-- **The antenna matters more than everything else on this page.** See
-  [Antenna placement](#antenna-placement-is-the-whole-game).
+- A Raspberry Pi 3, 4, 5, or Zero 2 W running **64-bit Raspberry Pi OS** (Bookworm or newer). 64-bit matters: the toolchain and release profile target `aarch64`.
+- An **RTL-SDR dongle** — RTL2832U with an R820T/R820T2 tuner is what the defaults assume — and a **1090 MHz antenna**.
+- A power supply with headroom. The dongle draws about 300 mA on top of the board, and an undervolted Pi throttles rather than crashing, which looks exactly like bad reception. `skyward doctor` checks for this.
+- **The antenna matters more than everything else on this page.** See [Antenna placement](#antenna-placement-is-the-whole-game).
 
 ---
 
@@ -42,11 +28,7 @@ Everything skyward-specific below (flag names, environment variables, ports,
 
 ### Free the dongle from the DVB driver
 
-Raspberry Pi OS ships `dvb_usb_rtl28xxu` and loads it automatically, because as
-far as the kernel is concerned this *is* a television tuner. It claims the
-device at boot, and every later attempt to open it fails with
-`usb_claim_interface error -6` — which reads like a permissions problem and is
-not one.
+Raspberry Pi OS ships `dvb_usb_rtl28xxu` and loads it automatically, because as far as the kernel is concerned this *is* a television tuner. It claims the device at boot, and every later attempt to open it fails with `usb_claim_interface error -6` — which reads like a permissions problem and is not one.
 
 ```bash
 sudo cp deploy/blacklist-rtl.conf /etc/modprobe.d/
@@ -60,8 +42,7 @@ sudo cp deploy/udev/99-skyward-rtlsdr.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Installing the `rtl-sdr` package does the same thing and also gives you
-`rtl_test` for cross-checking. It is worth having either way:
+Installing the `rtl-sdr` package does the same thing and also gives you `rtl_test` for cross-checking. It is worth having either way:
 
 ```bash
 sudo apt update && sudo apt install -y rtl-sdr
@@ -69,10 +50,7 @@ sudo apt update && sudo apt install -y rtl-sdr
 
 ### Keep the clock honest
 
-A Pi has no real-time clock and boots in 1970. Every timestamp is then garbage,
-`?max_age=` filters return nothing, and the whole system looks like a dead
-radio. It is almost always the last thing anyone suspects, so `doctor` checks it
-first.
+A Pi has no real-time clock and boots in 1970. Every timestamp is then garbage, `?max_age=` filters return nothing, and the whole system looks like a dead radio. It is almost always the last thing anyone suspects, so `doctor` checks it first.
 
 ```bash
 sudo timedatectl set-ntp true
@@ -85,19 +63,13 @@ timedatectl status        # want "System clock synchronized: yes"
 rtl_test -t
 ```
 
-`Found 1 device(s)` and a tuner line (`Rafael Micro R820T`) is what you want.
-Nothing found, after the blacklist step, means the module is still loaded or
-something else already holds the device — another `rtl_tcp`, `dump1090`, a
-previous `skyward`.
+`Found 1 device(s)` and a tuner line (`Rafael Micro R820T`) is what you want. Nothing found, after the blacklist step, means the module is still loaded or something else already holds the device — another `rtl_tcp`, `dump1090`, a previous `skyward`.
 
 ---
 
 ## 2. Get a binary onto the Pi
 
-The client is embedded at compile time, so it is built first and `cargo build`
-picks it up. A checkout that never built the client still compiles — the binary
-serves a placeholder page naming the command you skipped, and `doctor`'s
-`web.client` check reports it.
+The client is embedded at compile time, so it is built first and `cargo build` picks it up. A checkout that never built the client still compiles — the binary serves a placeholder page naming the command you skipped, and `doctor`'s `web.client` check reports it.
 
 Pick one of the three routes below.
 
@@ -122,20 +94,13 @@ cd client && npm ci && npm run build && cd ..
 cargo build --release --features usb
 ```
 
-> **On a Pi Zero 2 W, do not build the client here.** Vite under 512 MB is a
-> coin flip against the OOM killer. Build `client/build` on a laptop and copy
-> the directory across before running `cargo build`, or use route B.
+> **On a Pi Zero 2 W, do not build the client here.** Vite under 512 MB is a coin flip against the OOM killer. Build `client/build` on a laptop and copy the directory across before running `cargo build`, or use route B.
 
 ### Route B — cross-compile with `cross` (recommended)
 
-`cross` runs the build in a container that already has the C cross-toolchain,
-which is what makes this the least fragile route.
+`cross` runs the build in a container that already has the C cross-toolchain, which is what makes this the least fragile route.
 
-> **Note:** the build is *not* free of C dependencies, whatever earlier
-> versions of this guide said. `adsb-store` uses `rusqlite` with the `bundled`
-> feature, which compiles SQLite's C amalgamation, and the `usb` feature adds
-> librtlsdr. A cross-build has always needed a C cross-toolchain; `cross`
-> supplies one.
+> **Note:** the build is *not* free of C dependencies, whatever earlier versions of this guide said. `adsb-store` uses `rusqlite` with the `bundled` feature, which compiles SQLite's C amalgamation, and the `usb` feature adds librtlsdr. A cross-build has always needed a C cross-toolchain; `cross` supplies one.
 
 On your laptop:
 
@@ -165,9 +130,7 @@ export RTLSDR_LIB_DIR=/usr/lib/aarch64-linux-gnu
 cargo build --release --features usb --target aarch64-unknown-linux-gnu
 ```
 
-`RTLSDR_LIB_DIR` tells `crates/adsb-source/build.rs` where to look; without it
-the build script searches the host's directories, finds nothing, and prints a
-warning naming the variable.
+`RTLSDR_LIB_DIR` tells `crates/adsb-source/build.rs` where to look; without it the build script searches the host's directories, finds nothing, and prints a warning naming the variable.
 
 ---
 
@@ -177,23 +140,15 @@ warning naming the variable.
 sudo ./deploy/install.sh
 ```
 
-Five explicit steps, each printed: create the `skyward` system user and put it
-in `plugdev`; install the binary to `/usr/local/bin`; create
-`/var/lib/skyward`; install the udev rule and DVB blacklist; write
-`/etc/skyward.env` **only if one does not already exist**; install and enable
-the unit without starting it.
+Five explicit steps, each printed: create the `skyward` system user and put it in `plugdev`; install the binary to `/usr/local/bin`; create `/var/lib/skyward`; install the udev rule and DVB blacklist; write `/etc/skyward.env` **only if one does not already exist**; install and enable the unit without starting it.
 
-It refuses rather than guesses. It will not build anything, and it will not
-overwrite a configuration file holding a receiver position someone typed.
+It refuses rather than guesses. It will not build anything, and it will not overwrite a configuration file holding a receiver position someone typed.
 
-If you would rather do it by hand, read the script — it is short, and every
-step is a single command.
+If you would rather do it by hand, read the script — it is short, and every step is a single command.
 
 ### The `rtl_tcp` variant
 
-Only for a binary built **without** the `usb` feature. Two processes competing
-for one USB device is a guaranteed `usb_claim_interface error -6`, so install
-this unit *or* use direct USB, never both.
+Only for a binary built **without** the `usb` feature. Two processes competing for one USB device is a guaranteed `usb_claim_interface error -6`, so install this unit *or* use direct USB, never both.
 
 ```bash
 sudo cp deploy/systemd/rtl_tcp.service /etc/systemd/system/
@@ -202,8 +157,7 @@ sudo systemctl enable --now rtl_tcp
 #   SKYWARD_SOURCE=tcp:127.0.0.1:1234
 ```
 
-No `-f` or `-s` flags: skyward speaks the rtl_tcp control protocol and sets the
-frequency, sample rate and gain itself over the socket.
+No `-f` or `-s` flags: skyward speaks the rtl_tcp control protocol and sets the frequency, sample rate and gain itself over the socket.
 
 ---
 
@@ -215,14 +169,9 @@ Precedence, lowest to highest:
 defaults  <  skyward.toml  <  .env / environment  <  CLI flags  <  the runtime station overlay
 ```
 
-`skyward config` prints every value **with where it came from**, which is how
-you confirm an edit took effect on a machine you are not logged into. The full
-list of keys is in [CONFIGURATION.md](CONFIGURATION.md).
+`skyward config` prints every value **with where it came from**, which is how you confirm an edit took effect on a machine you are not logged into. The full list of keys is in [CONFIGURATION.md](CONFIGURATION.md).
 
-On a Pi the clean choice is `/etc/skyward.env`, read by systemd's
-`EnvironmentFile=`. Do not rely on a `.env` file: `dotenvy` resolves it
-relative to the *working directory*, so it silently stops applying the moment
-anything runs from elsewhere.
+On a Pi the clean choice is `/etc/skyward.env`, read by systemd's `EnvironmentFile=`. Do not rely on a `.env` file: `dotenvy` resolves it relative to the *working directory*, so it silently stops applying the moment anything runs from elsewhere.
 
 The minimum that matters:
 
@@ -251,24 +200,15 @@ RUST_LOG=info
 EOF
 ```
 
-**You can leave the position blank.** The server starts without one — it logs a
-warning, disables the range gate and local CPR, and decodes everything else —
-and you can set it from the web interface once it is running, without a
-restart. That is usually easier than editing a root-owned file over SSH.
+**You can leave the position blank.** The server starts without one — it logs a warning, disables the range gate and local CPR, and decodes everything else — and you can set it from the web interface once it is running, without a restart. That is usually easier than editing a root-owned file over SSH.
 
-Note the precedence, though: a position set that way is persisted to
-`SKYWARD_STATION_FILE` and **overrides** this file from then on. If you later
-edit `/etc/skyward.env` and nothing changes, that is why. `skyward doctor` says
-so explicitly (`station.shadowed`), and `curl -X DELETE .../api/v1/receiver`
-reverts it.
+Note the precedence, though: a position set that way is persisted to `SKYWARD_STATION_FILE` and **overrides** this file from then on. If you later edit `/etc/skyward.env` and nothing changes, that is why. `skyward doctor` says so explicitly (`station.shadowed`), and `curl -X DELETE .../api/v1/receiver` reverts it.
 
 ---
 
 ## 5. Start it, and verify it is actually receiving
 
-Do not trust "the service is active". That proves the process is up, which is
-exactly the thing that stays true for hours after a decoder dies. Check the
-real ends.
+Do not trust "the service is active". That proves the process is up, which is exactly the thing that stays true for hours after a decoder dies. Check the real ends.
 
 ```bash
 # Is the dongle visible and free? Works even while something else holds it.
@@ -287,9 +227,7 @@ Then, from anywhere on the network:
 curl -s http://raspberrypi.local:8080/healthz | jq
 ```
 
-`status: "ok"` with `decode.messages` climbing is the goal. What the fields
-mean, and what to do when they are wrong, is in
-[OPERATIONS.md](OPERATIONS.md).
+`status: "ok"` with `decode.messages` climbing is the goal. What the fields mean, and what to do when they are wrong, is in [OPERATIONS.md](OPERATIONS.md).
 
 Open the interface at `http://<pi>:8080/`.
 
@@ -297,21 +235,11 @@ Open the interface at `http://<pi>:8080/`.
 
 ## Antenna placement is the whole game
 
-Measured on identical hardware, moving one antenna through a doorway changed
-the message rate by more than 4×. No software change in this repository has
-ever come close to that.
+Measured on identical hardware, moving one antenna through a doorway changed the message rate by more than 4×. No software change in this repository has ever come close to that.
 
-Candidate preambles with **zero CRC-valid messages** is the signature of a
-signal that is present but too weak — almost always placement. Outdoors beats
-every indoor spot; a window beats an interior room; never mount the dipole flat
-against glass, where at 1090 MHz a coated pane detunes it and drops peak signal
-about sevenfold.
+Candidate preambles with **zero CRC-valid messages** is the signature of a signal that is present but too weak — almost always placement. Outdoors beats every indoor spot; a window beats an interior room; never mount the dipole flat against glass, where at 1090 MHz a coated pane detunes it and drops peak signal about sevenfold.
 
-If reception seems dead, tune an FM station around 98.5 MHz as a control. FM
-fine and 1090 silent means the antenna or its geometry, not the cable and not
-the software. The [README antenna
-table](../README.md#antenna-because-it-dominates-everything) and [Part VI of
-the study guide](GUIDE.md) cover why.
+If reception seems dead, tune an FM station around 98.5 MHz as a control. FM fine and 1090 silent means the antenna or its geometry, not the cable and not the software. The [README antenna table](../README.md#antenna-because-it-dominates-everything) and [Part VI of the study guide](GUIDE.md) cover why.
 
 ---
 
@@ -328,13 +256,9 @@ sudo install -m 0755 ~/skyward /usr/local/bin/skyward
 sudo systemctl restart skyward
 ```
 
-Because the client is embedded, this replaces server and interface together;
-there is no way to leave a stale client in front of a fresh server.
-`skyward --version` and `doctor`'s `web.client` line both describe what is
-actually inside the running binary.
+Because the client is embedded, this replaces server and interface together; there is no way to leave a stale client in front of a fresh server. `skyward --version` and `doctor`'s `web.client` line both describe what is actually inside the running binary.
 
-The database and the station overlay live in `/var/lib/skyward` and are
-untouched by an upgrade.
+The database and the station overlay live in `/var/lib/skyward` and are untouched by an upgrade.
 
 ---
 
@@ -357,5 +281,4 @@ untouched by an upgrade.
 | Interface unreachable from another machine | Bound to localhost, or a firewall | `SKYWARD_BIND=0.0.0.0:8080` |
 | Browser shows "client not built into this binary" | `npm run build` was skipped before `cargo build` | Build the client, rebuild, reinstall |
 
-A fuller account of what was checked, what was fixed, and what a Pi still has
-to confirm is in [PI_AUDIT.md](PI_AUDIT.md).
+A fuller account of what was checked, what was fixed, and what a Pi still has to confirm is in [PI_AUDIT.md](PI_AUDIT.md).
