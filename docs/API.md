@@ -22,7 +22,7 @@ Optional fields are **omitted**, not null. An aircraft that has not reported an 
 
 ## `GET /healthz`
 
-Freshness, not liveness. Returns **`200`** for `ok` and `degraded`, **`503`** for `stalled`, so a bare `curl -f` is a valid probe.
+Freshness, not liveness. Returns **`200`** for `ok` and `degraded`, **`503`** for `stalled` and `decode-stalled`, so a bare `curl -f` is a valid probe.
 
 ```json
 {
@@ -50,7 +50,7 @@ Freshness, not liveness. Returns **`200`** for `ok` and `degraded`, **`503`** fo
 
 | Field | Meaning |
 |---|---|
-| `status` | `ok`, `degraded` (storage is failing but decoding continues), or `stalled` (no samples for 30 s, or the source is down) |
+| `status` | `ok`, `degraded` (storage is failing but decoding continues), `stalled` (no samples for 30 s, or the source is down), or `decode-stalled` (samples keep arriving but nothing has decoded for `decode_stall_s`) |
 | `source.state` | `streaming` or `down` |
 | `source.effective_sample_rate_hz` | Samples actually consumed per second. Below the configured rate means the decoder is not keeping up — which looks exactly like bad reception in the message count, and is the half software can fix |
 | `source.overrun_bytes` | Bytes the *source* discarded before skyward saw them. Only a buffering source (USB) can be non-zero. This is the number that catches a loss the effective rate hides |
@@ -58,6 +58,23 @@ Freshness, not liveness. Returns **`200`** for `ok` and `degraded`, **`503`** fo
 | `warnings` | Prose, ready to show a person: an unsynced clock, dropped rows, write errors, overruns |
 
 The one thing this endpoint deliberately does *not* do is report `ok` because the process is up. An earlier version answered `ok` whenever SQLite was readable, which stayed true for hours after the decoder died.
+
+`stalled` and `decode-stalled` are different failures and worth keeping apart.
+`stalled` means the samples stopped: an unplugged dongle, a dead `rtl_tcp`, a
+source that will not reopen. `decode-stalled` means they did not — the radio is
+streaming, sample age is milliseconds, overruns are zero, and still nothing has
+passed CRC for `decode_stall_s` seconds.
+
+That second one was invisible until 2026-09-08, when this receiver ran six and a
+half minutes at `status: ok` with `last_sample_age_ms: 51` and decoded nothing.
+Only a restart cleared it, and the liveness watchdog never fired, because the one
+unhealthy state it could see was sample staleness.
+
+The honest caveat: a receiver in genuinely empty airspace looks identical to a
+wedged one, so this *can* fire on a quiet night. Hence a default of ten minutes
+rather than one, and `decode_stall_s = 0` to switch it off entirely. Ten minutes
+of total silence from a working receiver within range of any traffic does not
+happen.
 
 ## `GET /readyz`
 

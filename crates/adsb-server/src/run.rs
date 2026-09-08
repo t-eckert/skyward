@@ -80,6 +80,9 @@ pub struct AppState {
     pub source_description: String,
     pub counters: Arc<Counters>,
     pub store: Option<StoreHandle>,
+    /// Seconds the decoder may return nothing before health reports
+    /// `decode-stalled`. `0` disables the check.
+    pub decode_stall_s: u64,
 }
 
 /// Live counters shared between the decoder thread and the API.
@@ -126,6 +129,20 @@ impl AppState {
             -1
         };
 
+        // A radio that streams perfectly while the decoder produces nothing
+        // is the failure `stalled` cannot see: samples are fresh, the process
+        // is up, and the answer is still 200. Uptime is the fallback clock,
+        // because a receiver that has never decoded anything has no
+        // last-message timestamp to age -- and coming up wedged is exactly
+        // the case worth catching before a demo.
+        let decode_silent_s = if last_message > 0 {
+            message_age_s
+        } else {
+            self.started.elapsed().as_secs() as i64
+        };
+        let decode_stalled =
+            self.decode_stall_s > 0 && decode_silent_s > self.decode_stall_s as i64;
+
         let mut warnings = Vec::new();
         if now < 1_577_836_800_000 {
             warnings.push("system clock is before 2020; NTP has not synced".to_string());
@@ -149,9 +166,18 @@ impl AppState {
             ));
         }
 
+        if decode_stalled {
+            warnings.push(format!(
+                "no valid message in {decode_silent_s} s while samples keep arriving: the \
+                 decoder is wedged, not the radio. A restart clears it"
+            ));
+        }
+
         // Freshness, not liveness. "The process is up" is not health.
         let status = if !streaming || sample_age_ms > 30_000 {
             "stalled"
+        } else if decode_stalled {
+            "decode-stalled"
         } else if store.is_degraded() {
             "degraded"
         } else {
@@ -331,6 +357,7 @@ pub fn run(config: Config, args: RunArgs) -> ExitCode {
         source_description,
         counters: Arc::clone(&counters),
         store: store.as_ref().map(|s| s.handle()),
+        decode_stall_s: *config.decode_stall_s,
     });
 
     if station.get().is_none() {
@@ -628,5 +655,88 @@ fn init_logging(config: &Config) {
         fmt().json().with_env_filter(filter).init();
     } else {
         fmt().with_env_filter(filter).init();
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// An `AppState` with no store and no radio, aged `started_secs_ago`
+    /// seconds so the decode-stall clock can be driven without sleeping.
+    fn state(decode_stall_s: u64, started_secs_ago: u64) -> AppState {
+        let (station, _) = StationState::load(None, "test".into(), None, false);
+        AppState {
+            snapshot: Arc::new(ArcSwap::from_pointee(Snapshot::empty(Tick::now()))),
+            started: Instant::now()
+                .checked_sub(Duration::from_secs(started_secs_ago))
+                .expect("test clock is far enough from boot"),
+            station,
+            station_name: "test".into(),
+            db_path: ":memory:".into(),
+            sample_rate_hz: 2_400_000,
+            frequency_hz: 1_090_000_000,
+            impl_set: "test".into(),
+            source_description: "file:test".into(),
+            counters: Arc::new(Counters::default()),
+            store: None,
+            decode_stall_s,
+        }
+    }
+
+    /// Samples arriving right now, so nothing is `stalled`.
+    fn streaming(state: &AppState) {
+        state.counters.streaming.store(true, Ordering::Relaxed);
+        state
+            .counters
+            .last_sample_ms
+            .store(now_ms() as u64, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn decode_stall_is_unhealthy_while_samples_keep_arriving() {
+        // The failure this exists for, measured at the venue on 2026-09-08:
+        // a perfectly healthy sample stream and a decoder producing nothing.
+        let s = state(600, 900);
+        streaming(&s);
+        let h = s.health_json();
+        assert_eq!(h["status"], "decode-stalled");
+        assert!(h["source"]["last_sample_age_ms"].as_i64().unwrap() < 1_000);
+        assert!(h["warnings"][0].as_str().unwrap().contains("wedged"));
+    }
+
+    #[test]
+    fn quiet_but_young_receiver_is_still_ok() {
+        // Under the threshold, silence is just silence.
+        let s = state(600, 60);
+        streaming(&s);
+        assert_eq!(s.health_json()["status"], "ok");
+    }
+
+    #[test]
+    fn a_recent_message_clears_the_stall() {
+        let s = state(600, 900);
+        streaming(&s);
+        s.counters
+            .last_message_ms
+            .store(now_ms() as u64, Ordering::Relaxed);
+        assert_eq!(s.health_json()["status"], "ok");
+    }
+
+    #[test]
+    fn zero_disables_the_check() {
+        let s = state(0, 86_400);
+        streaming(&s);
+        assert_eq!(s.health_json()["status"], "ok");
+    }
+
+    #[test]
+    fn a_dead_radio_still_outranks_a_dead_decoder() {
+        // Both are true when the dongle is unplugged. `stalled` is the more
+        // specific answer and the one the operator needs, so it wins.
+        let s = state(600, 900);
+        s.counters.streaming.store(false, Ordering::Relaxed);
+        assert_eq!(s.health_json()["status"], "stalled");
     }
 }

@@ -56,6 +56,7 @@ gain_db = "49.6"
 bind = "0.0.0.0:8080"
 db_path = "/var/lib/skyward/skyward.db"
 retention_hours = 24
+decode_stall_s = 600
 cors_origins = ["http://localhost:5173"]
 log_format = "text"
 
@@ -152,6 +153,30 @@ CORS constrains browsers, not `curl`. It is not an authentication mechanism and 
 | `retention_hours` | `SKYWARD_RETENTION_HOURS` | — | `24` |
 
 `0` keeps everything, which will eventually fill the disk. Anything above 8760 (a year) is a startup error, on the grounds that it is far more often a units mistake than an intention.
+
+### Decoder liveness
+
+| Key | Env | Flag | Default |
+|---|---|---|---|
+| `decode_stall_s` | `SKYWARD_DECODE_STALL_S` | — | `600` |
+
+How long the decoder may produce no valid message before `/healthz` reports
+`decode-stalled` and answers `503`. `0` disables the check.
+
+This exists because samples arriving and messages coming out are different
+things, and until 2026-09-08 nothing here could tell them apart. That day this
+receiver streamed cleanly for six and a half minutes — `status: ok`,
+`last_sample_age_ms: 51`, zero overruns — and decoded nothing at all. A restart
+fixed it instantly. `deploy/skyward-healthcheck.sh` never fired, because a
+`curl -f` probe can only see states that return non-2xx, and sample freshness
+was fine throughout.
+
+Ten minutes, not one: empty airspace is real, and a receiver that restarts
+itself through every quiet spell is worse than one that occasionally wedges.
+Tune it *down* for a demo where the airspace is known busy and a wedge is
+expensive — with traffic in range the silence threshold can safely be a couple
+of minutes — and remember the watchdog adds its own `THRESHOLD` probes on top
+before it restarts anything.
 
 ### Logging
 

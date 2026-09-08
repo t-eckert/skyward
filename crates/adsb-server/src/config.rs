@@ -253,6 +253,7 @@ pub struct FileConfig {
     pub cors_origins: Option<Vec<String>>,
     pub log_format: Option<String>,
     pub retention_hours: Option<u32>,
+    pub decode_stall_s: Option<u64>,
     pub station_file: Option<String>,
     pub station_writable: Option<bool>,
     pub impl_set: Option<String>,
@@ -320,6 +321,9 @@ pub struct Config {
     pub log_format: Sourced<String>,
     /// How long recorded history is kept, in hours. `0` keeps everything.
     pub retention_hours: Sourced<u32>,
+    /// How long the decoder may return no valid message, in seconds, before
+    /// `/healthz` reports `decode-stalled` and answers 503. `0` disables it.
+    pub decode_stall_s: Sourced<u64>,
     /// Where a position set through the API is persisted.
     pub station_file: Sourced<String>,
     /// Whether the API may change the station position at all.
@@ -455,6 +459,26 @@ impl Config {
                 .or_layer(
                     env_parsed("SKYWARD_RETENTION_HOURS"),
                     env_origin("SKYWARD_RETENTION_HOURS"),
+                ),
+
+            // Samples arriving is not the same as messages coming out, and
+            // until now nothing in this process could tell the difference.
+            // Measured 2026-09-08 at the venue: six and a half minutes of
+            // `status: ok` with `last_sample_age_ms: 51` and zero overruns,
+            // while the decoder produced not one valid message. Only a
+            // restart cleared it. The liveness watchdog never fired because
+            // the sole unhealthy state it could see was sample staleness.
+            //
+            // 600 s and not 60: empty airspace is a real thing, and a
+            // receiver that restarts itself through every quiet spell is
+            // worse than one that occasionally wedges. Ten minutes of total
+            // silence from a working receiver within range of any traffic
+            // does not happen. Set 0 to switch the check off.
+            decode_stall_s: Sourced::new(600u64, Origin::Default)
+                .or_layer(file.decode_stall_s, file_origin.clone())
+                .or_layer(
+                    env_parsed("SKYWARD_DECODE_STALL_S"),
+                    env_origin("SKYWARD_DECODE_STALL_S"),
                 ),
 
             station_file: Sourced::new("skyward-station.toml".to_string(), Origin::Default)
@@ -654,6 +678,15 @@ impl Config {
                 self.retention_hours.value.to_string()
             },
             &self.retention_hours.origin,
+        );
+        row(
+            "decode_stall_s",
+            if *self.decode_stall_s == 0 {
+                "0 (decode-stall check disabled)".to_string()
+            } else {
+                self.decode_stall_s.value.to_string()
+            },
+            &self.decode_stall_s.origin,
         );
         row(
             "station_file",
