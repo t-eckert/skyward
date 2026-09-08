@@ -25,9 +25,12 @@
 
 use crate::{
     Pipeline,
-    detect::{NaiveDetector, PreambleDetector},
+    detect::{
+        CorrelatorDetector, NaiveDetector, PeakDetector, PreambleDetector, ScoredDetector,
+        SnrDetector,
+    },
     magnitude::{Magnitude, NaiveMagnitude},
-    slice::{BitSlicer, NaiveSlicer},
+    slice::{BitSlicer, InterpSlicer, NaiveSlicer},
     validate::{CrcOnlyValidator, FrameValidator},
 };
 
@@ -103,15 +106,43 @@ fn unknown(stage: &'static str, name: &str, available: &[(&str, &str)]) -> Regis
 pub const MAGNITUDE_NAMES: &[(&str, &str)] =
     &[("naive", "sqrt(i^2+q^2) in f32; the correctness reference")];
 
-pub const DETECTOR_NAMES: &[(&str, &str)] = &[(
-    "naive",
-    "half-microsecond slot means; min(pulse) > 2x max(silence), absolute threshold",
-)];
+pub const DETECTOR_NAMES: &[(&str, &str)] = &[
+    (
+        "naive",
+        "half-microsecond slot means; min(pulse) > 2x max(silence), absolute threshold",
+    ),
+    (
+        "snr",
+        "naive slots, but thresholded on a tracked noise floor instead of an absolute level",
+    ),
+    (
+        "scored",
+        "tracked noise floor; per-pulse contrast against adjacent silences, accumulated not vetoed",
+    ),
+    (
+        "peak",
+        "scored, with candidates suppressed when a stronger one occurred within a preamble",
+    ),
+    (
+        "corr",
+        "matched filter over the whole 8us preamble, fractional taps, ungated",
+    ),
+    (
+        "corr-peak",
+        "corr, with candidates suppressed when a stronger one occurred within a preamble",
+    ),
+];
 
-pub const SLICER_NAMES: &[(&str, &str)] = &[(
-    "naive",
-    "one sample per half-bit, compared directly; reports no confidence",
-)];
+pub const SLICER_NAMES: &[(&str, &str)] = &[
+    (
+        "naive",
+        "one sample per half-bit, compared directly; reports no confidence",
+    ),
+    (
+        "interp",
+        "linear interpolation at fractional half-bit centres; honours frac; real confidence",
+    ),
+];
 
 pub const VALIDATOR_NAMES: &[(&str, &str)] = &[(
     "crc-only",
@@ -128,6 +159,15 @@ pub fn magnitude(name: &str) -> Result<Box<dyn Magnitude>, RegistryError> {
 pub fn detector(name: &str, sample_rate: u32) -> Result<Box<dyn PreambleDetector>, RegistryError> {
     match name {
         "naive" => Ok(Box::new(NaiveDetector::new(sample_rate))),
+        "snr" => Ok(Box::new(SnrDetector::new(sample_rate))),
+        "scored" => Ok(Box::new(ScoredDetector::new(sample_rate))),
+        "peak" => Ok(Box::new(PeakDetector::new(sample_rate))),
+        "corr" => Ok(Box::new(CorrelatorDetector::new(sample_rate))),
+        "corr-peak" => Ok(Box::new(PeakDetector::wrapping(
+            Box::new(CorrelatorDetector::new(sample_rate)),
+            sample_rate,
+            "corr-peak",
+        ))),
         other => Err(unknown("detector", other, DETECTOR_NAMES)),
     }
 }
@@ -135,6 +175,7 @@ pub fn detector(name: &str, sample_rate: u32) -> Result<Box<dyn PreambleDetector
 pub fn slicer(name: &str, sample_rate: u32) -> Result<Box<dyn BitSlicer>, RegistryError> {
     match name {
         "naive" => Ok(Box::new(NaiveSlicer::new(sample_rate))),
+        "interp" => Ok(Box::new(InterpSlicer::new(sample_rate))),
         other => Err(unknown("slicer", other, SLICER_NAMES)),
     }
 }

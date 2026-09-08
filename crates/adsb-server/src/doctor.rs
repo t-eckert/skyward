@@ -221,6 +221,37 @@ fn check_config(report: &mut Report, config: &Config) {
         ),
     }
 
+    // The trap this check exists for: on a Pi the service gets its settings
+    // from systemd's EnvironmentFile, and a shell does not. So the obvious
+    // invocation --
+    //
+    //     sudo -u skyward skyward doctor
+    //
+    // -- reports the *defaults*, not what the running receiver is using, and
+    // says so with total confidence. Observed: a receiver running
+    // `detect=scored` while doctor reported `detect=naive`, which is exactly
+    // the "it ran but quietly used something else" failure this command was
+    // built to prevent.
+    #[cfg(target_os = "linux")]
+    {
+        const SERVICE_ENV: &str = "/etc/skyward.env";
+        if std::path::Path::new(SERVICE_ENV).exists()
+            && !std::env::vars().any(|(k, _)| k.starts_with("SKYWARD_"))
+        {
+            report.add(
+                Level::Warn,
+                "config.service_env",
+                format!(
+                    "{SERVICE_ENV} exists but no SKYWARD_* variable is set in this shell, so \
+                     everything below is the DEFAULT configuration and not what the running \
+                     service uses. systemd supplies that file to the unit, not to you. Re-run as: \
+                     sudo -u skyward env $(grep -vE '^\\s*#|^\\s*$' {SERVICE_ENV} | xargs) \
+                     skyward doctor"
+                ),
+            );
+        }
+    }
+
     // Provenance for every value: this is how an operator confirms an edit
     // actually took effect.
     for line in config.print_resolved().lines() {
@@ -428,7 +459,50 @@ fn check_host(report: &mut Report) {
     const UNDERVOLTED_EVER: u64 = 1 << 16;
     const THROTTLED_EVER: u64 = 1 << 18;
 
-    if let Some(flags) = read_throttled() {
+    let Some(power) = read_power_state() else {
+        // Never fall silent here. A check that vanishes when it cannot read
+        // its source is worse than no check at all: the report still looks
+        // complete, and the one failure that mimics a bad antenna goes
+        // unmentioned. Say that we do not know, and why.
+        report.add(
+            Level::Warn,
+            "host.power",
+            "could not determine the power state -- no get_throttled in sysfs, \
+             no rpi_volt hwmon, and vcgencmd unavailable (it needs /dev/vcio, \
+             which is root-only). Undervoltage would be invisible here, and it \
+             looks exactly like a bad antenna. Check `vcgencmd get_throttled` \
+             by hand"
+                .to_string(),
+        );
+        return;
+    };
+
+    if let PowerState::Alarm(undervolted) = power {
+        // The rpi_volt hwmon exposes only "undervolted right now" -- no
+        // throttling state and no sticky since-boot bits. Worth reporting,
+        // worth being explicit that it is the narrow answer.
+        let (level, detail) = if undervolted {
+            (
+                Level::Warn,
+                "UNDERVOLTAGE RIGHT NOW (rpi_volt hwmon). A throttled Pi cannot keep \
+                 up with 2.4 MS/s, so samples are dropped and the message count falls \
+                 -- which looks exactly like a bad antenna. Use a supply rated for the \
+                 board plus ~300 mA for the dongle, and a short thick cable"
+                    .to_string(),
+            )
+        } else {
+            (
+                Level::Pass,
+                "no undervoltage right now (rpi_volt hwmon; this source cannot see \
+                 throttling or the sticky since-boot bits -- run `vcgencmd \
+                 get_throttled` as root for those)"
+                    .to_string(),
+            )
+        };
+        report.add(level, "host.power", detail);
+    }
+
+    if let PowerState::Flags(flags) = power {
         let mut problems = Vec::new();
         if flags & UNDERVOLTED_NOW != 0 {
             problems.push("undervoltage RIGHT NOW");
@@ -501,20 +575,96 @@ fn check_host(report: &mut Report) {
 #[cfg(not(target_os = "linux"))]
 fn check_host(_report: &mut Report) {}
 
-/// `/sys/devices/platform/soc/soc:firmware/get_throttled`, or the vcgencmd
-/// equivalent. Absent on anything that is not a Raspberry Pi.
+/// What we managed to learn about the board's power state.
+///
+/// `Flags` is the full `get_throttled` bitmask, including the sticky
+/// since-boot bits. `Alarm` is the narrow answer the modern hwmon gives:
+/// undervolted right now, or not.
 #[cfg(target_os = "linux")]
-fn read_throttled() -> Option<u64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerState {
+    Flags(u64),
+    Alarm(bool),
+}
+
+/// Find the power state from whichever source this kernel actually has.
+///
+/// This needs three sources because the interface moved and the obvious one is
+/// gone. `get_throttled` in sysfs does not exist on current Raspberry Pi OS
+/// (measured: absent everywhere under /sys on kernel 6.18), so the original
+/// two-path lookup silently returned None and the check disappeared from the
+/// report on the exact hardware it was written for.
+///
+/// Order matters, and it is not preference order — it is richness order:
+///
+/// 1. Legacy sysfs `get_throttled`. Full bitmask, world-readable, gone on new
+///    kernels but free to try.
+/// 2. `vcgencmd get_throttled`. Full bitmask, and the only source for the
+///    sticky since-boot bits that catch the brownout at 3am. Needs /dev/vcio,
+///    which is root-only, so it fails for the unprivileged service account —
+///    hence the third source rather than this being the answer.
+/// 3. The `rpi_volt` hwmon `in0_lcrit_alarm`. Undervoltage only, no throttling
+///    and no history, but it is `-r--r--r--` and therefore the one source that
+///    works when `skyward doctor` runs as the service user.
+#[cfg(target_os = "linux")]
+fn read_power_state() -> Option<PowerState> {
     for path in [
         "/sys/devices/platform/soc/soc:firmware/get_throttled",
         "/sys/class/hwmon/hwmon0/get_throttled",
     ] {
         if let Ok(text) = std::fs::read_to_string(path) {
-            let text = text.trim();
-            let text = text.strip_prefix("0x").unwrap_or(text);
-            if let Ok(value) = u64::from_str_radix(text, 16) {
-                return Some(value);
+            if let Some(value) = parse_throttled(&text) {
+                return Some(PowerState::Flags(value));
             }
+        }
+    }
+
+    if let Ok(out) = std::process::Command::new("vcgencmd")
+        .arg("get_throttled")
+        .output()
+    {
+        if out.status.success() {
+            if let Some(value) = parse_throttled(&String::from_utf8_lossy(&out.stdout)) {
+                return Some(PowerState::Flags(value));
+            }
+        }
+    }
+
+    read_undervoltage_alarm().map(PowerState::Alarm)
+}
+
+/// Parse `throttled=0x50005`, `0x50005` or `50005` into a bitmask.
+///
+/// Accepting all three shapes is deliberate: sysfs emits the bare value and
+/// `vcgencmd` prefixes it with a key, and hard-coding either one is how this
+/// silently stops working the next time the interface moves.
+///
+/// Deliberately not `cfg`-gated: the parsing is the part most likely to be
+/// wrong, and it should be testable on the machine the code is written on
+/// rather than only on the Pi.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_throttled(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let text = text.rsplit('=').next()?.trim();
+    let text = text.strip_prefix("0x").unwrap_or(text);
+    u64::from_str_radix(text, 16).ok()
+}
+
+/// Undervoltage from the `rpi_volt` hwmon, which is where this moved to.
+///
+/// The hwmon index is not stable across boots — `cpu_thermal` and `rpi_volt`
+/// can swap — so match on the `name` file rather than hardcoding `hwmon1`.
+#[cfg(target_os = "linux")]
+fn read_undervoltage_alarm() -> Option<bool> {
+    let entries = std::fs::read_dir("/sys/class/hwmon").ok()?;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let name = std::fs::read_to_string(dir.join("name")).unwrap_or_default();
+        if name.trim() != "rpi_volt" {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(dir.join("in0_lcrit_alarm")) {
+            return Some(text.trim() != "0");
         }
     }
     None
@@ -840,6 +990,45 @@ fn check_source(report: &mut Report, config: &Config, seconds: u64) {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_throttled;
+
+    // The interface this check depends on has already moved once, silently.
+    // These pin the shapes it has to keep accepting.
+    #[test]
+    fn parses_the_vcgencmd_shape() {
+        assert_eq!(parse_throttled("throttled=0x50005\n"), Some(0x50005));
+    }
+
+    #[test]
+    fn parses_the_bare_sysfs_shapes() {
+        assert_eq!(parse_throttled("0x50005\n"), Some(0x50005));
+        assert_eq!(parse_throttled("50005"), Some(0x50005));
+        assert_eq!(parse_throttled("0x0\n"), Some(0));
+    }
+
+    #[test]
+    fn rejects_junk_rather_than_returning_zero() {
+        // Returning Some(0) for unparseable input would read as "power is
+        // fine", which is the worst possible failure for this particular check.
+        assert_eq!(parse_throttled(""), None);
+        assert_eq!(parse_throttled("nonsense"), None);
+        assert_eq!(parse_throttled("throttled="), None);
+    }
+
+    #[test]
+    fn decodes_the_bits_that_matter() {
+        // 0x50005 is what this project's own Pi reported on a bad supply:
+        // undervolted now, throttled now, and both sticky since boot.
+        let flags = parse_throttled("throttled=0x50005").unwrap();
+        assert_ne!(flags & (1 << 0), 0, "undervolted now");
+        assert_ne!(flags & (1 << 2), 0, "throttled now");
+        assert_ne!(flags & (1 << 16), 0, "undervolted since boot");
+        assert_ne!(flags & (1 << 18), 0, "throttled since boot");
+
+        let clean = parse_throttled("throttled=0x0").unwrap();
+        assert_eq!(clean, 0);
+    }
+
     use super::*;
     use crate::config::CliOverrides;
 

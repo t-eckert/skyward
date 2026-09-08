@@ -1,0 +1,23 @@
+# Probe every minute. With THRESHOLD=10 in the script that means a genuinely
+# stalled decoder is restarted about ten minutes after it goes quiet.
+#
+# Ten rather than three because this watchdog supervises something that already
+# heals itself: skyward reconnects to a pulled dongle in process, retrying with
+# backoff capped at 30 s. Restarting sooner would interrupt that. This exists
+# only for the failures the reconnect loop cannot reach.
+
+[Unit]
+Description=Probe skyward liveness every minute
+Documentation=https://github.com/t-eckert/skyward
+
+[Timer]
+# Not OnBootSec=0: skyward needs a moment to open the dongle and publish a
+# first snapshot, and probing before that would fail three times and restart a
+# service that was starting normally.
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=skyward-healthcheck.service
+
+[Install]
+WantedBy=timers.target

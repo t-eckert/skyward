@@ -2,7 +2,7 @@
 
 What actually stands between a fresh Pi and a working receiver, checked rather than assumed. Each finding says how it was verified, what was done about it, and — where nothing was done — why.
 
-**Boundary of this audit.** Everything below was checked on the development machine (macOS, aarch64) against this repository at the time of writing. **No step was run on a Raspberry Pi, and no RTL-SDR was attached** — `rtl_test -t` reported "No supported devices found" throughout. Findings are therefore of two kinds, and they are labelled: *measured* (a command was run and its output read) and *read from the source* (behaviour established from the code, and still needing a Pi to confirm). Nothing here is labelled measured on the strength of a code change alone.
+**Boundary of this audit.** The twelve numbered findings below were checked on the development machine (macOS, aarch64) against this repository at the time of writing. **No step was run on a Raspberry Pi, and no RTL-SDR was attached** — `rtl_test -t` reported "No supported devices found" throughout. That is still true of the numbered findings; they have not been rewritten. A later section, [First deployment, 2026-09-05](#first-deployment-2026-09-05), records what a real Pi with a real dongle has since confirmed, and is scoped just as narrowly. Findings are therefore of two kinds, and they are labelled: *measured* (a command was run and its output read) and *read from the source* (behaviour established from the code, and still needing a Pi to confirm). Nothing here is labelled measured on the strength of a code change alone.
 
 ---
 
@@ -223,14 +223,98 @@ Worth recording, because an audit that lists only problems misrepresents the sys
 
 ---
 
+## First deployment, 2026-09-05
+
+A Pi finally exists. This section records only what was **measured on it**, and is deliberately narrow — `skyward` itself was not yet built at the time of writing, so every finding above that depends on skyward's own code running is still open. The list at the end of this document stands.
+
+**The hardware is not what the docs assumed.** A Raspberry Pi 4 Model B Rev 1.5 (`b03115`) with **2 GB**, and an **RTL-SDR Blog V4** with a Rafael Micro **R828D** tuner — not the R820T/R820T2 assumed throughout. Debian trixie's `librtlsdr 2.0.2` identifies the V4 natively. Its 29-step gain table ends at 49.6, so the documented default gain is coincidentally valid on both tuners.
+
+**Finding 4's deployment files worked, in the part that could be tested.** `deploy/udev/99-skyward-rtlsdr.rules` plus `plugdev` membership let an unprivileged user claim the dongle: `rtl_test -t` run as a normal account returned `Found 1 device(s)`. The udev half of finding 1 is therefore *measured*. **The librtlsdr FFI in `usb.rs` is still not** — nothing in skyward has opened this device.
+
+**The DVB collision in finding 1 is real and immediate.** On a stock Trixie Lite image with the dongle attached, `dvb_usb_rtl28xxu`, `rtl2832`, `rtl2832_sdr` and `dvb_core` were all loaded at first boot, holding the device. `deploy/blacklist-rtl.conf` addresses it, and `modprobe -r` cleared it without a reboot. This is not a theoretical hazard.
+
+**Finding 6 was vindicated harder than expected, and not by skyward.** The board undervolts continuously at idle:
+
+```
+throttled=0x50005
+[  138.079732] hwmon hwmon1: Undervoltage detected!
+[  142.111787] hwmon hwmon1: Voltage normalised
+[  148.159888] hwmon hwmon1: Undervoltage detected!
+```
+
+Cycling every 15–25 s at 28.7 °C — power, not heat — before any decoding was asked of it. It throttles rather than resetting, so nothing corrupts, but this is exactly the invisible failure finding 6 describes. Note what actually surfaced it: `vcgencmd` run by hand. **`doctor`'s Linux host checks still have not executed**, and remain uncompiled code.
+
+**Finding 2 — the critical one — is now *measured*, and the fix works.** The dongle was physically unplugged from a running receiver and plugged back in:
+
+```
+20:30:19  source error, retrying   usb:0 stopped streaming        backoff 250ms
+          reconnect failed; will retry   cannot reopen usb:0: librtlsdr returned -1
+          ... 500ms -> 1000 -> 2000 -> 4000 -> 8000 -> 16000
+          Found Rafael Micro R828D tuner
+          RTL-SDR Blog V4 Detected
+          Allocating 15 zero-copy buffers
+```
+
+Afterwards: `state: streaming`, `last_sample_age_ms: 40`, `reconnects: 7`, `overrun_bytes: 0`, and — the part that matters — **`NRestarts: 0`**. systemd never intervened; `UsbSource::reconnect` closed, reopened, replayed the tuner settings and restarted streaming inside the process. The backoff doubles to a 30 s ceiling and resets on success, so a receiver unplugged overnight recovers within 30 s of the hardware returning.
+
+This is the failure the audit called the worst kind this system can have, and it is the one that had never run against hardware. It has now.
+
+**Power loss and a cold boot with no network cable are also measured.** Ethernet unplugged, power cut, restored: the board came back on Wi-Fi alone in about five seconds, `eth0` down with no address, `wlan0` the sole default route, the tailnet address unchanged and needing no re-authentication, all units active with `NRestarts=0`. `EXT4-fs (mmcblk0p2): orphan cleanup` on mount confirms the unmount was unclean; `PRAGMA integrity_check` on the database returned `ok`, and the runtime station position survived in its own file.
+
+**Three settings were written and silently did not take effect.** Worth recording as one finding rather than three, because it is a single mistake made three times: *writing a configuration file is not the same as the setting taking effect*, and every one of these passed a "does the file say the right thing" check.
+
+| Setting | Why it did nothing | Effective value before the fix |
+|---|---|---|
+| `StartLimitIntervalSec=0` | in `[Service]`; systemd only honours it in `[Unit]` | `10s` / 5 — the default this was meant to remove |
+| `RuntimeWatchdogSec=15s` | `10-` drop-in outranked by Raspberry Pi OS's `40-rpi-enable-watchdog.conf` | `1min` |
+| `Storage=persistent` | `10-` drop-in outranked by `40-rpi-volatile-storage.conf` | `volatile` — journald wrote to `/run` |
+
+The last one is the sharpest: the journal was being discarded on every boot, so the evidence needed to diagnose a power cut would have been erased *by* that power cut. All three now use `99-` prefixes or the correct section, and `deploy/pi-harden.sh` reports effective state from `systemctl show`, `journalctl --header` and `/proc/swaps` rather than from its own writes.
+
+**`vm.swappiness=1` was the right answer to the wrong question.** The reflexive "lower swappiness to spare the SD card" assumes a swapfile. Measured: the only active swap is `/dev/zram0` — compressed RAM, zstd — and `dphys-swapfile` does not exist as a unit on trixie. Swapping costs no card writes at all, so throttling it on a 2 GB board discards usable memory for no benefit. `pi-harden.sh` now detects zram and sets `100`, reserving `1` for genuinely disk-backed swap.
+
+**The realtime factor is measured, and the extrapolation was a little optimistic.** The "things that were already right" section estimated a Pi 4 core at "roughly 5-8x slower" than this development machine, leaving "~40-70x headroom", and labelled it extrapolated. Measured on the deployed Pi against the same fixture:
+
+```
+fixtures/raw/golden.cu8
+  messages     517   unique     517   aircraft    7   positions    72
+  candidates   879   yield   58.8%   cand/msg   1.7   172.3 msg/min
+  guards: ghosts 0.000   realtime 38.9x   10.7 ns/sample
+```
+
+Against 376.8x and 1.1 ns/sample on the Mac the same afternoon, that is **9.7x slower, for 38.9x headroom** -- outside the predicted range, on the side that matters. Still ample: the decoder needs about 1/38.9 of one core, and `top` independently showed the running service at 3.0%, which is the same number arrived at two different ways.
+
+This matters beyond curiosity, because `realtime_factor` is one of the two guards that can veto an apparent pipeline win. That guard is now calibrated against a measurement rather than a guess. A candidate implementation roughly 39x slower than the naive baseline would fail to keep up on this hardware.
+
+**The decode is bit-identical across platforms.** Same 517 messages, 879 candidates, 58.8% yield, and the same digest `fnv1a64:c3ed11b99d82a415` on both aarch64-darwin and aarch64-linux; `bench --compare` reported "digest unchanged -- behaviour is identical". Worth recording explicitly: nothing in the repository previously demonstrated that the DSP produces identical output on the two architectures it actually runs on, and a silent numerical difference between them would have undermined every comparison the scoreboard exists to make.
+
+**Cross-compiling remains blocked exactly as finding 3 says.** `cargo check --target aarch64-unknown-linux-gnu` on macOS fails in `libsqlite3-sys`:
+
+```
+error occurred in cc-rs: failed to find tool "aarch64-linux-gnu-gcc"
+```
+
+An attempt to type-check the never-compiled `#[cfg(target_os = "linux")]` blocks ahead of a slow Pi build therefore did not succeed. Those blocks are still unproven.
+
+**One documentation mechanism turned out not to exist.** Headless provisioning was planned around Raspberry Pi Imager's `custom.toml`. The 2026-06-18 Trixie Lite image contains no such string; the deployment now uses `systemd.run=` in `cmdline.txt`, which depends only on systemd. Had this not been checked before flashing, the result would have been a Pi that booted to no user, no key and no network.
+
+---
+
 ## What a Pi still has to confirm
 
-Everything in this audit that is labelled *read from the source*. Concretely, on first deployment:
+Most of this list is now closed. Kept as a checklist for the *next* deployment, with what the first one actually returned:
 
-```bash
-skyward devices                    # finding 1: the FFI against real hardware
-skyward doctor                     # findings 6, 7: host checks, position handling
-skyward bench                      # the realtime figure on this CPU
-curl -s localhost:8080/healthz | jq '.source'   # finding 9: overrun_bytes stays 0
-sudo systemctl restart rtl_tcp     # finding 2: skyward must recover by itself
-```
+| Check | Covers | Status |
+|---|---|---|
+| `skyward devices` | finding 1, enumeration FFI | **confirmed** — matches `rtl_test` |
+| `skyward run` opening the dongle | finding 1, `rtlsdr_open` onward | **confirmed** — tuned and streamed at 2.400 MS/s |
+| `skyward doctor` | findings 6, 7 — host checks, position handling | **confirmed**, and it found a bug: see `host.power` below |
+| `curl /healthz \| jq .source` | finding 9, `overrun_bytes` | **confirmed** — stayed 0 throughout |
+| unplug the dongle mid-run | finding 2, `IqSource::reconnect` | **confirmed** — recovered in process, `NRestarts=0` |
+| pull mains power | the whole durability premise | **confirmed** — clean return, `integrity_check: ok` |
+| `skyward bench` | the realtime figure on this CPU | **confirmed** — 38.9x realtime, 10.7 ns/sample |
+
+Two things the first deployment showed that this list did not think to ask for, and which belong on it next time:
+
+- **Check that a setting took effect, not that it was written.** Three did not. See the table above.
+- **`host.power` reported nothing at all,** because `get_throttled` no longer exists in sysfs on kernel 6.18 and the check silently returned `None` rather than saying it could not tell. The check that exists to catch undervoltage was dead on the exact hardware it was written for, on a board that was undervolting at the time. Fixed to try `vcgencmd` and the `rpi_volt` hwmon, and to warn loudly when it cannot determine the state at all.

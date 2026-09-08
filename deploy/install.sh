@@ -55,6 +55,15 @@ fi
 # plugdev is what the udev rule grants the dongle to.
 usermod -aG plugdev "$SERVICE_USER"
 echo "  $SERVICE_USER is in plugdev"
+# video is what /dev/vcio_gencmd is grouped to, and vcgencmd is the only source
+# for the sticky since-boot throttling bits -- the ones that catch the brownout
+# at 3am that nobody was awake for. Without this, `sudo -u skyward skyward
+# doctor` falls back to the rpi_volt hwmon, which can only say whether the
+# board is undervolted *right now*.
+if getent group video >/dev/null; then
+	usermod -aG video "$SERVICE_USER"
+	echo "  $SERVICE_USER is in video (vcgencmd, for host.power)"
+fi
 
 step "Binary"
 install -m 0755 "$BINARY" "$PREFIX/skyward"

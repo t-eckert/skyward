@@ -27,6 +27,7 @@
 	 */
 	setWorkerUrl(workerUrl);
 	import type { Aircraft } from '$lib/api';
+	import type { TrailPoint } from '$lib/live.svelte';
 	import { theme } from '$lib/themes/state.svelte';
 	import { num } from '$lib/format';
 
@@ -59,6 +60,8 @@
 		selected: string | null;
 		/** The view is a frozen snapshot, not live. */
 		frozen?: boolean;
+		/** Where each aircraft has been this session, keyed by ICAO. */
+		trails?: Map<string, TrailPoint[]>;
 		onselect: (icao: string | null) => void;
 	}
 
@@ -68,6 +71,7 @@
 		nowMs,
 		selected,
 		frozen = false,
+		trails = new Map(),
 		onselect,
 		onsetstation
 	}: Props = $props();
@@ -220,6 +224,40 @@
 		};
 	});
 
+	/**
+	 * One LineString per aircraft that has been seen in more than one place.
+	 *
+	 * Styled by the same three states as the glyphs -- selected, stale, live --
+	 * so a trail and its aircraft always read as the same object. A trail with
+	 * a single point is skipped rather than drawn: MapLibre renders a
+	 * degenerate LineString as nothing anyway, and filtering here keeps the
+	 * feature count honest.
+	 */
+	const trailsGeoJSON = $derived.by(() => {
+		const features = [];
+		for (const [icao, points] of trails) {
+			if (points.length < 2) continue;
+			const lastTs = points[points.length - 1].ts;
+			features.push({
+				type: 'Feature' as const,
+				properties: {
+					icao,
+					state:
+						icao === selected
+							? 'selected'
+							: nowMs - lastTs > STALE_MS
+								? 'stale'
+								: 'live'
+				},
+				geometry: {
+					type: 'LineString' as const,
+					coordinates: points.map((p) => [p.lon, p.lat])
+				}
+			});
+		}
+		return { type: 'FeatureCollection' as const, features };
+	});
+
 	const stationGeoJSON = $derived.by(() => ({
 		type: 'FeatureCollection' as const,
 		features:
@@ -253,6 +291,7 @@
 		m.addSource('rings', { type: 'geojson', data: ringsGeoJSON });
 		m.addSource('station', { type: 'geojson', data: stationGeoJSON });
 		m.addSource('aircraft', { type: 'geojson', data: aircraftGeoJSON });
+		m.addSource('trails', { type: 'geojson', data: trailsGeoJSON });
 
 		m.addLayer({
 			id: 'rings-line',
@@ -287,6 +326,37 @@
 				'text-color': token('--color-muted'),
 				'text-halo-color': token('--color-bg'),
 				'text-halo-width': 1.5
+			}
+		});
+
+		// Added here on purpose. Layers stack in the order they are added, so
+		// this sits above the rings and below both the station dot and the
+		// aircraft glyphs -- a trail must never draw over the aircraft it
+		// belongs to, or the thing you are trying to click disappears under
+		// its own history.
+		m.addLayer({
+			id: 'trails-line',
+			type: 'line',
+			source: 'trails',
+			layout: {
+				'line-cap': 'round',
+				'line-join': 'round'
+			},
+			paint: {
+				'line-color': [
+					'match',
+					['get', 'state'],
+					'selected',
+					token('--color-selected'),
+					'stale',
+					token('--color-stale'),
+					token('--color-live')
+				],
+				'line-width': ['case', ['==', ['get', 'state'], 'selected'], 2.2, 1.2],
+				// Deliberately faint. The trail is context for the glyph, not a
+				// second thing competing with it, and a sky full of solid lines
+				// buries the basemap the rings are measured against.
+				'line-opacity': ['case', ['==', ['get', 'state'], 'selected'], 0.85, 0.35]
 			}
 		});
 
@@ -402,6 +472,11 @@
 	$effect(() => {
 		const data = aircraftGeoJSON;
 		if (styleReady) untrack(() => setData('aircraft', data));
+	});
+
+	$effect(() => {
+		const data = trailsGeoJSON;
+		if (styleReady) untrack(() => setData('trails', data));
 	});
 
 	$effect(() => {

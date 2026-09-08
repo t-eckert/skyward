@@ -73,6 +73,7 @@
 		nowMs={live.nowMs}
 		selected={live.selected}
 		{frozen}
+		trails={live.trails}
 		onselect={(icao) => (live.selected = icao)}
 		onsetstation={() => (editingStation = true)}
 	/>

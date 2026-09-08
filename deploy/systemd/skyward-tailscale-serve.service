@@ -1,0 +1,53 @@
+# Publish skyward on the tailnet, declaratively.
+#
+# `tailscale serve --bg` already persists in tailscaled's state and survives a
+# reboot on its own. This unit exists anyway because that state is invisible: a
+# command someone typed once, six months ago, is not something you can diff or
+# review. This is.
+#
+# It pairs with SKYWARD_BIND=127.0.0.1:8080 in /etc/skyward.env. skyward
+# listens on loopback and *only* loopback; tailscaled is the single front door.
+# That is what keeps the unauthenticated PUT /api/v1/receiver off the LAN.
+#
+#   sudo cp deploy/systemd/skyward-tailscale-serve.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now skyward-tailscale-serve
+#
+# Requires HTTPS certificates enabled for the tailnet (admin console →
+# DNS → HTTPS Certificates). Without that, `serve --https` fails and this unit
+# retries forever with a clear message in the journal.
+
+[Unit]
+Description=Publish skyward over Tailscale
+Documentation=https://tailscale.com/kb/1312/serve
+After=tailscaled.service skyward.service network-online.target
+Wants=tailscaled.service
+
+# In [Unit], not [Service] -- systemd silently ignores it in [Service].
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# --bg returns immediately and leaves the proxy running inside tailscaled, so
+# this is a configuration call, not a daemon. Re-running it is idempotent.
+# tailscaled being "started" is not the same as it having a tailnet address.
+# On the boot after a power cut it is still bringing the link up, `serve` exits
+# 1 with "unexpected state: NoState", and the unit fails once before the
+# Restart= below saves it. Waiting is cheaper than a failed unit in the log
+# that someone has to interpret at 3am.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 2; done; echo "tailscaled has no tailnet address after 120s"; exit 1'
+ExecStart=/usr/bin/tailscale serve --bg --https=443 http://127.0.0.1:8080
+ExecStop=/usr/bin/tailscale serve --https=443 off
+
+# tailscaled may not have a tailnet address the instant this runs, especially
+# on the boot after a power cut where DHCP and NTP are also still settling.
+Restart=on-failure
+RestartSec=10s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skyward-serve
+
+[Install]
+WantedBy=multi-user.target

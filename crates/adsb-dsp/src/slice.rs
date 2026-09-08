@@ -159,6 +159,152 @@ impl BitSlicer for NaiveSlicer {
     }
 }
 
+/// Linear interpolation at fractional sample positions, with real confidence.
+///
+/// # Why this is the slicer that matters at 2.4 MS/s
+///
+/// A half-bit is **1.2 samples** here. [`NaiveSlicer`] takes the one sample
+/// nearest each half-bit and rounds the position, so it can sit up to half a
+/// sample off -- **42% of a half-bit** -- and it does so differently on every
+/// one of 112 bits because the true positions are not on a sample grid.
+///
+/// That also explains why `slice.rs`'s first suggestion, integrating over each
+/// half-bit, is worth little at this rate: there is barely more than one
+/// sample per half-bit to integrate. The error is in *where* the sample is
+/// taken, not in how many are averaged. So this interpolates instead.
+///
+/// # It consumes `Candidate::frac`
+///
+/// The detector may know the preamble began between samples. Nothing produced
+/// that until now, but the field exists and honouring it costs one addition:
+/// the whole frame shifts by the sub-sample amount rather than every bit
+/// inheriting the detector's rounding error.
+///
+/// # And it reports confidence
+///
+/// `|early - late| / (early + late)`, as the module docs suggest. Nothing
+/// consumes it yet -- the only validator is `crc-only` -- but reporting 255
+/// for every bit, as the naive slicer does, is an assertion of certainty the
+/// slicer has no basis for, and it is what stops stage 4 from ever being
+/// written.
+pub struct InterpSlicer {
+    /// Fractional sample positions of each half-bit centre, relative to the
+    /// start of the preamble.
+    windows: Vec<(f64, f64)>,
+}
+
+impl InterpSlicer {
+    pub fn new(sample_rate: u32) -> Self {
+        let spus = samples_per_us(sample_rate);
+        let windows = (0..LONG_BITS)
+            .map(|bit| {
+                // Bit k spans [8 + k, 9 + k) us, and the half-bits are
+                // **start-anchored** -- sampled at their leading edge, not
+                // their centre. This is the same convention the detector uses
+                // for its slots, and for the same reason: a Mode S pulse
+                // *begins* at its nominal time.
+                //
+                // Worth recording because it was got wrong here first.
+                // Sampling half-bit centres instead is the obvious-looking
+                // choice and it is much worse: 3262 messages -> 1308, and
+                // positions 732 -> 269 on the golden fixture. detect.rs
+                // records the identical mistake one stage up, where it "cost
+                // an hour the first time".
+                let t = PREAMBLE_US + bit as f64;
+                ((t * spus), ((t + 0.5) * spus))
+            })
+            .collect();
+        InterpSlicer { windows }
+    }
+
+    /// Magnitude at a fractional sample position, linearly interpolated.
+    #[inline]
+    fn at(mag: &[u16], pos: f64) -> Option<f32> {
+        if pos < 0.0 {
+            return None;
+        }
+        let i = pos.floor() as usize;
+        if i + 1 >= mag.len() {
+            return None;
+        }
+        let frac = (pos - i as f64) as f32;
+        Some(f32::from(mag[i]) * (1.0 - frac) + f32::from(mag[i + 1]) * frac)
+    }
+}
+
+impl BitSlicer for InterpSlicer {
+    fn name(&self) -> &'static str {
+        "interp"
+    }
+
+    fn describe(&self) -> &'static str {
+        "linear interpolation at fractional half-bit centres; honours frac; real confidence"
+    }
+
+    fn slice(&self, mag: &[u16], cand: &Candidate, out: &mut RawFrame) -> bool {
+        // The detector's sub-sample estimate shifts the entire frame, rather
+        // than each bit inheriting a rounding error independently.
+        let base = cand.offset as f64 + cand.frac as f64;
+
+        let read = |bit: usize| -> Option<(f32, f32)> {
+            let (e, l) = self.windows[bit];
+            Some((Self::at(mag, base + e)?, Self::at(mag, base + l)?))
+        };
+
+        let decide = |early: f32, late: f32| -> (u8, u8) {
+            let bit = u8::from(early > late);
+            let sum = early + late;
+            // Confidence is how decisively one half beat the other. Two halves
+            // of equal energy is not a bit -- most often it is two aircraft
+            // transmitting at once -- and saying so is much more useful than
+            // guessing with full confidence.
+            let conf = if sum > 0.0 {
+                (((early - late).abs() / sum) * 255.0).clamp(0.0, 255.0) as u8
+            } else {
+                0
+            };
+            (bit, conf)
+        };
+
+        for bit in 0..5 {
+            let Some((early, late)) = read(bit) else {
+                return false;
+            };
+            let (b, c) = decide(early, late);
+            out.bits[bit] = b;
+            out.conf[bit] = c;
+        }
+
+        let df = {
+            let mut v = 0u8;
+            for i in 0..5 {
+                v = (v << 1) | out.bits[i];
+            }
+            v
+        };
+        let len = if df >= 16 { LONG_BITS } else { SHORT_BITS };
+
+        for bit in 5..len {
+            let Some((early, late)) = read(bit) else {
+                return false;
+            };
+            let (b, c) = decide(early, late);
+            out.bits[bit] = b;
+            out.conf[bit] = c;
+        }
+
+        for bit in len..LONG_BITS {
+            out.bits[bit] = 0;
+            out.conf[bit] = 0;
+        }
+
+        out.len = len;
+        out.signal = cand.signal;
+        out.noise = cand.noise;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +312,122 @@ mod tests {
     use crate::synth;
 
     const RATE: u32 = 2_400_000;
+
+    /// A candidate at `offset` with no sub-sample hint.
+    fn cand_at(offset: usize) -> Candidate {
+        Candidate {
+            offset,
+            frac: 0.0,
+            score: 1.0,
+            noise: 100,
+            signal: 1000,
+        }
+    }
+
+    #[test]
+    fn interp_half_bits_are_start_anchored_not_centred() {
+        // The mistake this slicer was written wrong for the first time.
+        // Centring costs 60% of the messages; see the constructor comment.
+        let s = InterpSlicer::new(RATE);
+        let spus = samples_per_us(RATE);
+        let (early, late) = s.windows[0];
+        assert!(
+            (early - PREAMBLE_US * spus).abs() < 1e-9,
+            "bit 0's early half must start at the preamble edge, got {early}"
+        );
+        assert!(
+            (late - (PREAMBLE_US + 0.5) * spus).abs() < 1e-9,
+            "bit 0's late half must start half a microsecond later, got {late}"
+        );
+    }
+
+    #[test]
+    fn interp_positions_are_fractional_and_do_not_drift() {
+        // At 2.4 MS/s a bit is 2.4 samples. Rounding each position to an
+        // integer walks 48 samples across 112 bits; keeping them fractional
+        // is the whole point.
+        let s = InterpSlicer::new(RATE);
+        let spus = samples_per_us(RATE);
+        let last = s.windows[LONG_BITS - 1].0;
+        let want = (PREAMBLE_US + (LONG_BITS - 1) as f64) * spus;
+        assert!(
+            (last - want).abs() < 1e-9,
+            "bit 111 drifted: {last} vs {want}"
+        );
+        assert!(
+            last.fract() > 1e-6,
+            "the last bit landed exactly on a sample; positions are not fractional"
+        );
+    }
+
+    #[test]
+    fn interp_reads_between_samples() {
+        // Halfway between 1000 and 2000 must read 1500, not either endpoint.
+        let mag = [1000u16, 2000, 1000, 2000];
+        assert_eq!(InterpSlicer::at(&mag, 0.0), Some(1000.0));
+        assert_eq!(InterpSlicer::at(&mag, 0.5), Some(1500.0));
+        assert_eq!(InterpSlicer::at(&mag, 1.0), Some(2000.0));
+        assert_eq!(
+            InterpSlicer::at(&mag, 99.0),
+            None,
+            "past the end must not panic"
+        );
+    }
+
+    #[test]
+    fn interp_honours_the_candidates_sub_sample_offset() {
+        // frac has been defined and plumbed through since stage 2 was written
+        // and nothing has ever produced or consumed it. Shifting the frame by
+        // a sub-sample amount must actually move where the bits are read.
+        let iq = synth::synthesize(
+            &synth::canonical_messages(),
+            &synth::SynthConfig {
+                sample_rate: RATE,
+                ..Default::default()
+            },
+        );
+        let mag = compute_vec(&NaiveMagnitude, &iq);
+        let s = InterpSlicer::new(RATE);
+
+        let mut a = RawFrame::default();
+        let mut b = RawFrame::default();
+        let mut c = cand_at(0);
+        assert!(s.slice(&mag, &c, &mut a));
+        c.frac = 0.4;
+        assert!(s.slice(&mag, &c, &mut b));
+
+        assert!(
+            a.bits != b.bits || a.conf != b.conf,
+            "frac had no effect; the sub-sample offset is being ignored"
+        );
+    }
+
+    #[test]
+    fn interp_reports_confidence_rather_than_asserting_certainty() {
+        // The naive slicer returns 255 for every bit, which is a claim it has
+        // no basis for and is what stops stage 4 from ever being written.
+        let iq = synth::synthesize(
+            &synth::canonical_messages(),
+            &synth::SynthConfig {
+                sample_rate: RATE,
+                ..Default::default()
+            },
+        );
+        let mag = compute_vec(&NaiveMagnitude, &iq);
+        let s = InterpSlicer::new(RATE);
+        let mut f = RawFrame::default();
+        assert!(s.slice(&mag, &cand_at(0), &mut f));
+
+        let conf = &f.conf[..f.len];
+        assert!(
+            conf.iter().any(|&c| c != 255),
+            "every bit reported full confidence; that is the naive behaviour"
+        );
+        assert!(
+            conf.iter().any(|&c| c > 0),
+            "no bit had any confidence at all"
+        );
+    }
 
     #[test]
     fn bit_positions_do_not_drift_across_the_frame() {

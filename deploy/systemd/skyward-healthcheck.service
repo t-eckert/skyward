@@ -1,0 +1,27 @@
+# The probe half of the decoder-liveness watchdog. See deploy/skyward-healthcheck.sh
+# for why this exists when skyward.service already has Restart=always.
+#
+#   sudo install -m 0755 deploy/skyward-healthcheck.sh /usr/local/bin/
+#   sudo cp deploy/systemd/skyward-healthcheck.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now skyward-healthcheck.timer
+
+[Unit]
+Description=skyward decoder liveness probe
+Documentation=https://github.com/t-eckert/skyward
+# No Requires=: if skyward is stopped on purpose, the probe should not drag it
+# back up, and a failed probe against a deliberately-stopped unit is noise.
+After=skyward.service
+ConditionPathExists=/usr/local/bin/skyward-healthcheck.sh
+
+[Service]
+Type=oneshot
+# Root, because it calls `systemctl restart`. The script does nothing else
+# privileged and reaches only loopback.
+ExecStart=/usr/local/bin/skyward-healthcheck.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skyward-healthcheck
+
+# The probe itself must never be the thing that wedges. If curl hangs past its
+# own --max-time, kill the whole run rather than stacking invocations.
+TimeoutStartSec=30

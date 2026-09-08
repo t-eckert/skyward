@@ -1,0 +1,214 @@
+# skyward Taskfile
+#
+# The deploy pipeline exists because it was hand-typed a dozen times during the
+# first deployment, and a sequence you retype is a sequence you eventually get
+# wrong. Every step it runs is one that was actually needed on real hardware.
+
+version: '3'
+
+vars:
+  PROJECT_NAME: skyward
+  # Override per invocation:  task deploy PI_HOST=skyward.tailnet.ts.net
+  # The tailnet name works from anywhere; skyward.local only on the same LAN.
+  PI_USER: '{{.PI_USER | default "thomas"}}'
+  PI_HOST: '{{.PI_HOST | default "skyward.local"}}'
+  PI: '{{.PI_USER | default "thomas"}}@{{.PI_HOST | default "skyward.local"}}'
+  # Where the working copy lives on the Pi. Not a git checkout -- rsync target.
+  PI_DIR: '~/skyward'
+  # Kept in one place because every rsync in this file must use the same set.
+  # target/ and node_modules/ are excluded so --delete cannot eat a build.
+  RSYNC_EXCLUDES: >-
+    --exclude target/ --exclude node_modules/ --exclude .svelte-kit/
+    --exclude .git/ --exclude '*.cu8' --exclude 'skyward.db*' --exclude .env
+    --exclude storybook-static/
+
+tasks:
+  default:
+    desc: "List all available tasks"
+    cmds:
+      - task --list-all
+    silent: true
+
+  # ---------------------------------------------------------------- local
+  client:
+    desc: "Build the web client (embedded into the binary at compile time)"
+    dir: client
+    cmds:
+      - npm run build
+    sources:
+      - src/**/*
+      - package.json
+      - vite.config.*
+    generates:
+      - build/**/*
+
+  build:
+    desc: "Build the release binary for this machine"
+    deps: [client]
+    cmds:
+      - cargo build --release
+
+  test:
+    desc: "Run the whole workspace test suite"
+    cmds:
+      - cargo test --workspace
+
+  check:
+    desc: "Format, lint and type-check everything"
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - task: check:client
+      - task: check:shell
+
+  check:client:
+    desc: "Type-check the Svelte client"
+    dir: client
+    cmds:
+      - npx svelte-check --tsconfig ./tsconfig.json --threshold error
+
+  check:shell:
+    desc: "Lint every shell script under deploy/"
+    cmds:
+      - bash -n deploy/*.sh deploy/boot/*.sh deploy/boot/*.example
+      - shellcheck -S warning deploy/*.sh deploy/boot/provision.sh deploy/boot/firstrun.sh.example
+
+  # ---------------------------------------------------------------- bench
+  bench:
+    desc: "Score the pipeline locally against every fixture present"
+    cmds:
+      - cargo build --release
+      - ./target/release/skyward bench {{.CLI_ARGS}} fixtures/raw/*.cu8
+
+  bench:pi:
+    desc: "Score on the Pi, against golden AND the local capture. Pass --detect NAME via CLI_ARGS"
+    cmds:
+      # Two fixtures on purpose. golden.cu8 is a strong-signal reference with a
+      # known answer; office.cu8 is what this receiver actually hears, which is
+      # weaker and therefore the harder test. An improvement that helps only
+      # strong signals shows on one and not the other, and that difference is
+      # the interesting part.
+      #
+      # EACH FIXTURE IS READ ONCE INTO PAGE CACHE FIRST, and that is not
+      # optional. Measured on this Pi: the same detector on the same file
+      # scores 9.7x realtime cold and 38.9x warm, because an 864 MB read from
+      # the SD card takes longer than decoding it. A cold run measures the
+      # card, not the pipeline -- and since only ~1.6 GB is available, two
+      # 864 MB fixtures evict each other, so warming must happen immediately
+      # before each one. Without this the second fixture always looks slower
+      # than the first, whatever is in it.
+      - ssh {{.PI}} 'cd {{.PI_DIR}} && cat fixtures/raw/golden.cu8 > /dev/null'
+      - ssh {{.PI}} 'cd {{.PI_DIR}} && /usr/local/bin/skyward bench {{.CLI_ARGS}} --compare runs/baseline.json fixtures/raw/golden.cu8'
+      - ssh {{.PI}} 'cd {{.PI_DIR}} && ls fixtures/raw/office.cu8 >/dev/null 2>&1 && cat fixtures/raw/office.cu8 > /dev/null || true'
+      - ssh {{.PI}} 'cd {{.PI_DIR}} && ls fixtures/raw/office.cu8 >/dev/null 2>&1 && /usr/local/bin/skyward bench {{.CLI_ARGS}} fixtures/raw/office.cu8 || echo "  (no office.cu8 on the Pi yet -- see the plan, Phase 0)"'
+
+  bench:record:
+    desc: "Score a named detector on the Pi and keep the run record. task bench:record -- --detect snr"
+    cmds:
+      - ssh {{.PI}} 'cd {{.PI_DIR}} && /usr/local/bin/skyward bench {{.CLI_ARGS}} --out /tmp/run.json --compare runs/baseline.json fixtures/raw/golden.cu8'
+      - scp {{.PI}}:/tmp/run.json runs/latest.json
+      - echo "  run record in runs/latest.json -- rename it before the next attempt"
+
+  bench:capture:
+    desc: "Capture a new 180 s fixture from the Pi's antenna (stops the receiver briefly)"
+    cmds:
+      # An unlabelled IQ file with an assumed sample rate is a silent
+      # multi-evening bug, so this prints the metadata a sidecar needs.
+      - ssh {{.PI}} 'sudo systemctl stop skyward && sleep 2'
+      - defer: ssh {{.PI}} 'sudo systemctl start skyward'
+      - ssh {{.PI}} 'date -u +"started_utc = \"%Y-%m-%dT%H:%M:%SZ\""'
+      - ssh {{.PI}} 'rtl_sdr -f 1090000000 -s 2400000 -g 49.6 -n 432000000 {{.PI_DIR}}/fixtures/raw/{{.NAME | default "capture"}}.cu8'
+      - ssh {{.PI}} 'date -u +"ended_utc   = \"%Y-%m-%dT%H:%M:%SZ\""'
+      - ssh {{.PI}} 'cd {{.PI_DIR}}/fixtures/raw && ls -la {{.NAME | default "capture"}}.cu8 && sha256sum {{.NAME | default "capture"}}.cu8'
+
+  # ---------------------------------------------------------------- deploy
+  deploy:
+    desc: "Build, ship, compile on the Pi, install and verify"
+    cmds:
+      - task: client
+      - task: deploy:sync
+      - task: deploy:build
+      - task: deploy:install
+      - task: deploy:verify
+
+  deploy:sync:
+    desc: "Mirror this checkout to the Pi (one-way; Pi-side edits are destroyed)"
+    cmds:
+      # --delete makes the Pi a real mirror. Without it a file deleted here
+      # lingers there, and the two slowly stop being the same tree.
+      - rsync -az --delete {{.RSYNC_EXCLUDES}} ./ {{.PI}}:{{.PI_DIR}}/
+      - echo "  synced to {{.PI}}:{{.PI_DIR}}"
+
+  deploy:build:
+    desc: "Compile on the Pi (aarch64, with the usb feature)"
+    cmds:
+      # -j2 on purpose: 2 GB of RAM against lto=thin and codegen-units=1.
+      - ssh {{.PI}} 'cd {{.PI_DIR}} && PATH=$HOME/.cargo/bin:$PATH cargo build --release --features usb -j2'
+
+  deploy:install:
+    desc: "Install the binary on the Pi and restart the service"
+    cmds:
+      - ssh {{.PI}} 'sudo install -m 0755 {{.PI_DIR}}/target/release/skyward /usr/local/bin/skyward'
+      - ssh {{.PI}} 'sudo systemctl restart skyward'
+
+  deploy:config:
+    desc: "Reinstall units, udev rules and scripts from the repo (fixes drift)"
+    cmds:
+      - ssh {{.PI}} 'sudo cp {{.PI_DIR}}/deploy/systemd/skyward.service {{.PI_DIR}}/deploy/systemd/skyward-tailscale-serve.service {{.PI_DIR}}/deploy/systemd/skyward-healthcheck.service {{.PI_DIR}}/deploy/systemd/skyward-healthcheck.timer /etc/systemd/system/'
+      - ssh {{.PI}} 'sudo install -m 0755 {{.PI_DIR}}/deploy/skyward-healthcheck.sh /usr/local/bin/'
+      - ssh {{.PI}} 'sudo cp {{.PI_DIR}}/deploy/udev/99-skyward-rtlsdr.rules /etc/udev/rules.d/ && sudo cp {{.PI_DIR}}/deploy/blacklist-rtl.conf /etc/modprobe.d/'
+      - ssh {{.PI}} 'sudo systemctl daemon-reload && sudo udevadm control --reload-rules'
+      - echo "  config reinstalled -- restart skyward for unit changes to apply"
+
+  deploy:verify:
+    desc: "Prove the deploy worked, rather than assuming it did"
+    cmds:
+      # A unit being active says the process started, which stays true for
+      # hours after a decoder dies. /healthz reports freshness, so it is the
+      # only one of these that means anything about the radio.
+      - ssh {{.PI}} 'systemctl is-active skyward'
+      - ssh {{.PI}} 'curl -fsS --max-time 10 http://127.0.0.1:8080/healthz | jq "{status,source:.source.state,overrun:.source.overrun_bytes,decode}"'
+      - ssh {{.PI}} 'cd /var/lib/skyward && sudo -u skyward env $(grep -vE "^\s*#|^\s*$" /etc/skyward.env | xargs) /usr/local/bin/skyward doctor --offline 2>&1 | grep -E "web.client|host.power|selftest|build.pipeline"'
+
+  deploy:drift:
+    desc: "Check the installed config still matches this checkout"
+    cmds:
+      - ./deploy/verify-drift.sh {{.PI}}
+
+  # ---------------------------------------------------------------- the box
+  pi:ssh:
+    desc: "Shell on the Pi"
+    interactive: true
+    cmds:
+      - ssh {{.PI}}
+
+  pi:logs:
+    desc: "Follow the receiver log"
+    interactive: true
+    cmds:
+      - ssh -t {{.PI}} 'sudo journalctl -u skyward -f -o cat'
+
+  pi:health:
+    desc: "What the receiver currently sees"
+    cmds:
+      - ssh {{.PI}} 'curl -fsS http://127.0.0.1:8080/healthz | jq .'
+
+  pi:stats:
+    desc: "Decoder counters -- candidates vs crc_ok is the antenna tell"
+    cmds:
+      - ssh {{.PI}} 'curl -fsS http://127.0.0.1:8080/api/v1/stats | jq .'
+
+  pi:doctor:
+    desc: "Full self-check on the Pi, including the live radio"
+    cmds:
+      - ssh {{.PI}} 'sudo systemctl stop skyward'
+      - defer: ssh {{.PI}} 'sudo systemctl start skyward'
+      # env $(...) on purpose: systemd hands /etc/skyward.env to the unit,
+      # not to a shell, so a bare `skyward doctor` reports the defaults rather
+      # than what the receiver is actually running.
+      - ssh {{.PI}} 'cd /var/lib/skyward && sudo -u skyward env $(grep -vE "^\s*#|^\s*$" /etc/skyward.env | xargs) /usr/local/bin/skyward doctor --source usb --capture-seconds 5'
+
+  pi:power:
+    desc: "Undervoltage and throttling -- these look exactly like a bad antenna"
+    cmds:
+      - ssh {{.PI}} 'vcgencmd get_throttled; vcgencmd measure_temp; sudo dmesg | grep -ci undervoltage | sed "s/^/undervoltage events since boot /"'

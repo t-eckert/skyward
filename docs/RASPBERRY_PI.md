@@ -18,9 +18,34 @@ Everything skyward-specific below (flag names, environment variables, ports, `do
 ## What you need
 
 - A Raspberry Pi 3, 4, 5, or Zero 2 W running **64-bit Raspberry Pi OS** (Bookworm or newer). 64-bit matters: the toolchain and release profile target `aarch64`.
-- An **RTL-SDR dongle** — RTL2832U with an R820T/R820T2 tuner is what the defaults assume — and a **1090 MHz antenna**.
+- An **RTL-SDR dongle** — RTL2832U with an R820T/R820T2 tuner is what the defaults assume — and a **1090 MHz antenna**. An **RTL-SDR Blog V4** (Rafael Micro **R828D** tuner) also works and is what this project is deployed against; it needs `librtlsdr` 2.0 or newer for native V4 support, which Debian trixie has. Its gain table also tops out at 49.6, so the documented `SKYWARD_GAIN_DB` default is valid on both.
 - A power supply with headroom. The dongle draws about 300 mA on top of the board, and an undervolted Pi throttles rather than crashing, which looks exactly like bad reception. `skyward doctor` checks for this.
 - **The antenna matters more than everything else on this page.** See [Antenna placement](#antenna-placement-is-the-whole-game).
+
+---
+
+## 0. Provision the card before first boot
+
+A headless Pi has to arrive on the network already knowing its hostname, its user, your SSH key and its Wi-Fi. Raspberry Pi Imager normally arranges that by writing `custom.toml` to the boot partition — but **do not assume that mechanism is present**. The 2026-06-18 Trixie Lite image does not contain the string `custom.toml` anywhere, and betting a headless deployment on a parser that is not there gets you a Pi you cannot reach and cannot diagnose.
+
+`deploy/boot/` uses `systemd.run=` in `cmdline.txt` instead. That is a plain systemd feature — `systemd-run-generator` and `kernel-command-line.target`, both verified present — so it works on any image that boots systemd at all.
+
+```bash
+# after dd'ing the image to the card
+SKY_WIFI_SSID='...' ./deploy/boot/provision.sh /Volumes/bootfs
+```
+
+It substitutes `deploy/boot/firstrun.sh.example`, writes the result to the boot partition, and appends the hook. On first boot the script sets the hostname, creates the user with your public key, writes a NetworkManager keyfile for Wi-Fi, sets the timezone, **removes its own hook from `cmdline.txt`**, and reboots. Because the unhook is the last thing it does, a power cut halfway through leaves the hook in place and simply retries.
+
+Three details that are deliberate:
+
+**Password authentication stays on.** It is disabled later, by `pi-harden.sh`, once key login has actually been demonstrated. Doing both in one step is how a headless box with no monitor becomes a brick.
+
+**SSH is enabled two ways** — `systemctl enable ssh` *and* the `ssh` marker file that Raspberry Pi OS's own `sshswitch.service` acts on. Losing SSH is the one failure here with no recovery short of pulling the card.
+
+**Wi-Fi gets `autoconnect-priority=-10`**, below the default wired connection. Ethernet wins when both are up, and Wi-Fi takes over silently when the cable comes out — which is the point if the receiver ever travels.
+
+The Wi-Fi passphrase and the password hash sit on a FAT partition in the clear until first boot consumes them. That is inherent to headless provisioning, not a choice this script made, but it is worth knowing before you hand someone the card.
 
 ---
 
@@ -230,6 +255,74 @@ curl -s http://raspberrypi.local:8080/healthz | jq
 `status: "ok"` with `decode.messages` climbing is the goal. What the fields mean, and what to do when they are wrong, is in [OPERATIONS.md](OPERATIONS.md).
 
 Open the interface at `http://<pi>:8080/`.
+
+---
+
+## 6. Publish it over Tailscale
+
+The API is unauthenticated and `PUT /api/v1/receiver` changes where the receiver thinks it is. On a home LAN that is a reasonable default and the blast radius is one map pin. Reachable from anywhere else, it is not.
+
+Binding to loopback and letting Tailscale be the only front door fixes both halves at once — nothing on the LAN can reach the write endpoint, and you get real TLS and a stable name from outside.
+
+```bash
+# /etc/skyward.env
+SKYWARD_BIND=127.0.0.1:8080
+```
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --ssh --hostname=skyward
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8080
+```
+
+That is `https://skyward.<tailnet>.ts.net`, with a certificate, reachable only by your own devices. `--ssh` additionally means shell access without an open port 22 or any key distribution.
+
+Two prerequisites in the admin console: **HTTPS Certificates** must be enabled for the tailnet, and the ACL must permit Tailscale SSH to the node.
+
+`serve --bg` persists in tailscaled's state on its own, so this survives a reboot without help. `deploy/systemd/skyward-tailscale-serve.service` installs it as a unit anyway — a command someone typed once, six months ago, is not something you can review or diff, and this deployment's whole premise is a machine nobody logs into.
+
+Keep `sshd` enabled and key-only until Tailscale SSH is demonstrably working. Turning off the way in, in the same session that enables its replacement, is a bad trade on a box with no monitor.
+
+---
+
+## 7. Harden it against power loss
+
+An ADS-B receiver lives on mains power with no UPS, in a place nobody looks at, and it will be unplugged mid-write. `deploy/pi-harden.sh` does the seven things that make that survivable, each printed, refusing rather than guessing.
+
+The unit already handles the crude part: `Restart=always` with `StartLimitIntervalSec=0`, so a Pi that boots before its USB bus settles does not exhaust systemd's default five attempts and stay down forever. The script covers the rest.
+
+**Journald is capped, not made volatile.** Volatile journald is the usual SD-card advice and it is wrong here: it erases the evidence of the power cut *on* the power cut, and "what happened before it went quiet" is the only question you ever ask this machine. 64 MB, persistent.
+
+**Swap is kept, with `vm.swappiness=1`.** Also against the usual advice, and for a specific reason: on a 2 GB board the OOM killer taking the decoder is a worse outcome than the card wear. `swappiness=1` means the kernel pages out only to avoid an OOM, so in normal operation nothing is written and the wear argument never applies.
+
+**A hardware watchdog.** `RuntimeWatchdogSec=15s` against the BCM2711 watchdog. `Restart=always` handles a dead process; nothing in userspace handles a wedged kernel.
+
+**`/tmp` on tmpfs, `noatime`, `fsck.repair=yes` confirmed**, and unattended security upgrades. The `fsck.repair` check is a check rather than a change — it is a Raspberry Pi OS default, but a card imaged from something else may not have it, and without it an unclean shutdown can drop the Pi to a repair prompt it will sit at forever.
+
+**It also measures host power**, because that is the failure that hides best — see below.
+
+### The decoder-liveness watchdog
+
+`Restart=always` cannot see the failure this codebase calls its worst outcome: the unit stays `active`, the log stays silent, and no sample has arrived for hours.
+
+`/healthz` reports freshness rather than liveness and returns **503** for `stalled`, so `curl -f` is the entire probe. `deploy/systemd/skyward-healthcheck.timer` runs it every minute and restarts skyward after **three consecutive** failures, at most once per fifteen minutes.
+
+Both limits matter. One missed probe during a checkpoint is not a dead radio, and an unplugged antenna is `stalled` forever — a watchdog without a cap turns that into a restart loop that buries the real cause under its own log spam.
+
+Install it **after** you have confirmed the source recovers on its own, not before. Otherwise the watchdog papers over exactly the reconnect bug it would be hiding.
+
+### Undervoltage looks exactly like a bad antenna
+
+Worth stating on its own, because it has cost this project an evening already.
+
+A Raspberry Pi does not crash when its supply sags. It drops its clock. A throttled Pi cannot consume 2.4 MS/s, so samples are dropped, so the message count falls — and every visible symptom points at the aerial. The firmware knows the whole time and nothing asks it.
+
+```bash
+vcgencmd get_throttled     # 0x0 is what you want
+sudo dmesg | grep -i voltage
+```
+
+`0x50005` means under-voltage now, throttled now, and both have happened since boot. At a low temperature it is definitively power, not heat. The fix is a supply rated for the board plus roughly 300 mA for the dongle, and a short, thick cable — no antenna move will help, and any `skyward bench` figure taken in this state is void.
 
 ---
 

@@ -11,6 +11,17 @@
 Description=rtl_tcp IQ server for skyward
 After=network-online.target
 Before=skyward.service
+# Do not give up after the default five attempts in ten seconds. A Pi that
+# boots before its USB bus settles, or before NTP, would otherwise be
+# permanently `failed` after a power cut — the exact scenario this is
+# deployed into, and the one thing this unit most has to survive.
+#
+# This MUST live in [Unit], not [Service]. systemd accepts the file either way
+# and silently ignores it in [Service], logging only
+#   Unknown key 'StartLimitIntervalSec' in section [Service], ignoring
+# at load time, so the protection reads as present in the file and is not.
+# Verify with:  systemctl show <unit> -p StartLimitIntervalUSec   (want 0)
+StartLimitIntervalSec=0
 
 [Service]
 Type=exec
@@ -21,7 +32,6 @@ SupplementaryGroups=plugdev
 ExecStart=/usr/bin/rtl_tcp -a 127.0.0.1 -p 1234
 Restart=always
 RestartSec=5s
-StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rtl_tcp

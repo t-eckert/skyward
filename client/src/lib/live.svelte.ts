@@ -55,6 +55,29 @@ interface RateSample {
 	messages: number;
 }
 
+/** One recorded position on an aircraft's trail. */
+export interface TrailPoint {
+	lon: number;
+	lat: number;
+	ts: number;
+}
+
+/**
+ * How many fixes to keep per aircraft. At roughly one snapshot a second this
+ * is about ten minutes of trail, which is long enough to show the shape of an
+ * approach and short enough that a busy sky does not turn the map into felt.
+ */
+const TRAIL_MAX_POINTS = 600;
+
+/**
+ * How long to keep a trail after the aircraft stops appearing in snapshots.
+ *
+ * Not zero: an aircraft that drops out for a few seconds and comes back should
+ * keep its line rather than restarting from a bare dot, and with marginal
+ * reception that gap is the normal case rather than the exception.
+ */
+const TRAIL_TTL_MS = 120_000;
+
 export class Live {
 	/** The most recent snapshot, retained across a disconnect. */
 	envelope = $state<AircraftEnvelope | null>(null);
@@ -72,6 +95,20 @@ export class Live {
 
 	/** The ICAO the operator has selected, if any. */
 	selected = $state<string | null>(null);
+
+	/**
+	 * Where each aircraft has been, accumulated from the snapshots this page
+	 * has actually seen.
+	 *
+	 * Deliberately client-side rather than fetched from `/track`. The server
+	 * has real recorded history, but it only writes a row when an aircraft has
+	 * *moved*, so a per-aircraft fetch returns a sparser line than the one the
+	 * stream can draw for free -- and it costs a request per aircraft. The
+	 * trade is that a reload starts the trails empty, which is honest: it is
+	 * showing what this session has observed, not claiming history it did not
+	 * see.
+	 */
+	trails = $state<Map<string, TrailPoint[]>>(new Map());
 
 	/** Ticks once a second so ages re-render even when no snapshot arrives. */
 	tick = $state<number>(Date.now());
@@ -140,6 +177,7 @@ export class Live {
 		source.addEventListener('snapshot', (event) => {
 			const envelope = JSON.parse((event as MessageEvent).data) as AircraftEnvelope;
 			this.envelope = envelope;
+			this.#recordTrails(envelope);
 			this.lastSnapshotMs = Date.now();
 			this.disconnectedAtMs = null;
 			this.connection = 'streaming';
@@ -263,6 +301,44 @@ export class Live {
 	get sourceSilentMs(): number | null {
 		const age = this.health?.source.last_sample_age_ms;
 		return age === undefined ? null : age;
+	}
+
+	/**
+	 * Extend every trail with this snapshot, and forget the ones that have gone.
+	 *
+	 * Only called from the snapshot handler, which is what keeps a frozen view
+	 * frozen: when the stream drops, no snapshot arrives, so no trail grows. A
+	 * disconnected map that kept drawing lines would be inventing flight.
+	 */
+	#recordTrails(envelope: AircraftEnvelope) {
+		const next = new Map(this.trails);
+		const present = new Set<string>();
+
+		for (const a of envelope.aircraft) {
+			if (a.lat === undefined || a.lon === undefined) continue;
+			present.add(a.icao);
+
+			const points = next.get(a.icao) ?? [];
+			const last = points[points.length - 1];
+			// Skip a repeated position. The snapshot is published on a timer,
+			// not on movement, so a slow or stationary aircraft would otherwise
+			// spend its whole trail budget on one point.
+			if (last && last.lat === a.lat && last.lon === a.lon) continue;
+
+			const extended = [...points, { lon: a.lon, lat: a.lat, ts: a.last_seen_ms }];
+			if (extended.length > TRAIL_MAX_POINTS) {
+				extended.splice(0, extended.length - TRAIL_MAX_POINTS);
+			}
+			next.set(a.icao, extended);
+		}
+
+		for (const [icao, points] of next) {
+			if (present.has(icao)) continue;
+			const lastTs = points[points.length - 1]?.ts ?? 0;
+			if (envelope.now_ms - lastTs > TRAIL_TTL_MS) next.delete(icao);
+		}
+
+		this.trails = next;
 	}
 
 	/** The reference clock for ages: the server's, frozen at disconnect. */

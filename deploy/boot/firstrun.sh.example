@@ -1,0 +1,147 @@
+#!/bin/bash
+#
+# First-boot provisioning for a headless skyward Pi. This is a TEMPLATE: the
+# double-underscore tokens below are substituted by deploy/boot/provision.sh,
+# which writes the result to the boot partition. Do not add such a token to a
+# comment -- provision.sh refuses to install a file with any left unsubstituted,
+# and cannot tell a real one from a mention of one.
+#
+# Why this rather than Raspberry Pi Imager's custom.toml: the 2026-06-18 Trixie
+# Lite image does not contain the string "custom.toml" anywhere, so its TOML
+# provisioning parser is not something to bet a headless deployment on. This
+# instead hangs off `systemd.run=` in cmdline.txt, which is a plain systemd
+# feature (systemd-run-generator, kernel-command-line.target — both verified
+# present in the image). It runs once, as root, before anyone logs in.
+#
+# It removes its own hook from cmdline.txt at the end, so it runs exactly once
+# even if the machine loses power halfway through it.
+
+set -euo pipefail
+exec > >(tee /var/log/firstrun.log) 2>&1
+echo "== skyward firstrun $(date -Is)"
+
+BOOT=/boot/firmware
+[[ -d $BOOT ]] || BOOT=/boot
+
+# ---------------------------------------------------------------- hostname
+CURRENT=$(cat /etc/hostname)
+echo "__HOSTNAME__" >/etc/hostname
+sed -i "s/127.0.1.1.*$CURRENT/127.0.1.1\t__HOSTNAME__/" /etc/hosts
+hostnamectl set-hostname "__HOSTNAME__" 2>/dev/null || true
+echo "hostname: __HOSTNAME__"
+
+# ---------------------------------------------------------------- user
+# Trixie Lite ships with no default account at all, so this creates one rather
+# than renaming `pi`.
+if ! id __USERNAME__ >/dev/null 2>&1; then
+	useradd -m -s /bin/bash __USERNAME__
+	echo '__USERNAME__:__PASSWORD_HASH__' | chpasswd -e
+fi
+for g in adm dialout cdrom sudo audio video plugdev games users input render netdev gpio i2c spi; do
+	getent group "$g" >/dev/null 2>&1 && adduser __USERNAME__ "$g" >/dev/null 2>&1 || true
+done
+# Matches what Raspberry Pi Imager does for the account it creates. It is also
+# what lets the rest of the deployment run over SSH without an interactive
+# password prompt on every sudo.
+echo '__USERNAME__ ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/010-__USERNAME__-nopasswd
+chmod 0440 /etc/sudoers.d/010-__USERNAME__-nopasswd
+echo "user: __USERNAME__ (sudo, plugdev, netdev)"
+
+# ---------------------------------------------------------------- ssh
+install -d -m 0700 -o __USERNAME__ -g __USERNAME__ /home/__USERNAME__/.ssh
+cat >/home/__USERNAME__/.ssh/authorized_keys <<'KEYS'
+__SSH_PUBKEY__
+KEYS
+chmod 0600 /home/__USERNAME__/.ssh/authorized_keys
+chown __USERNAME__:__USERNAME__ /home/__USERNAME__/.ssh/authorized_keys
+
+# Password authentication stays ON for now, deliberately. It is turned off in
+# deploy/pi-harden.sh, after key login has actually been demonstrated. Doing
+# both in one step is how a headless box with no monitor becomes a brick.
+install -d -m 0755 /etc/ssh/sshd_config.d
+cat >/etc/ssh/sshd_config.d/10-skyward.conf <<'SSHD'
+PubkeyAuthentication yes
+PermitRootLogin no
+SSHD
+
+# Belt and braces, because losing SSH on a headless box is the one failure with
+# no recovery short of pulling the card. Enable the unit directly, AND drop the
+# marker file that Raspberry Pi OS's own sshswitch.service acts on at boot. If
+# either mechanism works we are reachable.
+systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
+touch "$BOOT/ssh"
+if systemctl is-enabled ssh >/dev/null 2>&1 || systemctl is-enabled sshd >/dev/null 2>&1; then
+	echo "ssh: unit enabled, key installed, password auth still on"
+else
+	echo "ssh: WARNING -- could not enable the unit; relying on $BOOT/ssh marker"
+fi
+
+# ---------------------------------------------------------------- wifi
+# Bookworm and later use NetworkManager, not wpa_supplicant. This writes a
+# keyfile directly rather than relying on wpa_supplicant.conf being converted.
+#
+# Ethernet needs nothing here — DHCP on eth0 is automatic, and when both are
+# present NetworkManager prefers the wire. The Wi-Fi is the fallback for when
+# the cable is out, which on a box that gets moved is a real case.
+#
+# What actually makes the wire win is the ROUTE METRIC, which NetworkManager
+# assigns by device type: eth0 gets 100 and wlan0 gets 600, so both default
+# routes exist and the lower metric carries the traffic. It is not
+# autoconnect-priority, which only decides between connections competing for
+# the same device — measured on this deployment, the default wired profile
+# sits at -999, i.e. *lower* than the -10 below, and the wire still wins.
+# Via a variable, not the placeholder directly: after substitution an unset
+# SSID becomes an empty string and the test is correct, but shellcheck can only
+# see a literal and (reasonably) calls it always-true. This reads better too.
+WIFI_SSID="__WIFI_SSID__"
+if [[ -n "$WIFI_SSID" ]]; then
+	raspi-config nonint do_wifi_country "__WIFI_COUNTRY__" >/dev/null 2>&1 || true
+	rfkill unblock wifi 2>/dev/null || true
+	install -d -m 0700 /etc/NetworkManager/system-connections
+	cat >/etc/NetworkManager/system-connections/preconfigured.nmconnection <<'NMCONN'
+[connection]
+id=preconfigured
+uuid=__WIFI_UUID__
+type=wifi
+autoconnect=true
+# Only relevant if several wireless profiles ever compete for wlan0. Ethernet
+# vs Wi-Fi is decided by route metric, not by this. Verified: with the cable
+# pulled, traffic moves to wlan0 with no restart and the tailnet address is
+# unchanged.
+autoconnect-priority=-10
+
+[wifi]
+mode=infrastructure
+ssid=__WIFI_SSID__
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=__WIFI_PSK__
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+addr-gen-mode=default
+NMCONN
+	chmod 0600 /etc/NetworkManager/system-connections/preconfigured.nmconnection
+	echo "wifi: configured for $WIFI_SSID (country __WIFI_COUNTRY__), autoconnect on"
+else
+	echo "wifi: not configured; ethernet only"
+fi
+
+# ---------------------------------------------------------------- locale/time
+# A Pi has no real-time clock and boots in 1970. Every timestamp is then
+# garbage and the whole receiver looks like a dead radio, so this matters more
+# here than it looks.
+timedatectl set-timezone "__TIMEZONE__" 2>/dev/null || ln -sf "/usr/share/zoneinfo/__TIMEZONE__" /etc/localtime
+timedatectl set-ntp true 2>/dev/null || true
+echo "time: __TIMEZONE__, ntp on"
+
+# ---------------------------------------------------------------- unhook
+# Remove the systemd.run tokens so this never runs again. Done last, so a power
+# cut mid-provision leaves the hook in place and simply retries.
+sed -i 's| systemd\.run=[^ ]*||g; s| systemd\.run_success_action=[^ ]*||g; s| systemd\.unit=[^ ]*||g' "$BOOT/cmdline.txt"
+sync
+echo "== firstrun complete $(date -Is); rebooting"
